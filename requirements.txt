@@ -1,0 +1,6 @@
+gymnasium==0.29.1
+stable-baselines3==2.1.0
+torch
+numpy
+pandas
+matplotlib
