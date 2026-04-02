@@ -37,7 +37,7 @@ from models.dqn_agent import DQNAgent
 # ──────────────────────────────────────────────────────────────────────────
 COMPARE_CONFIG = {
     "n_episodes":   100,
-    "n_edge_nodes": 3,
+    "n_edge_nodes": 2,
     "max_steps":    200,
     "log_dir":      "experiments/logs",
     "plot_dir":     "experiments/plots",

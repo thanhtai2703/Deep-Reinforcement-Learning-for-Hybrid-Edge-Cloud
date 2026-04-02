@@ -146,12 +146,12 @@ class SmartDispatcher:
     demo_mode       : True = dùng simulation thay vì Prometheus thật
     """
 
-    NODE_NAMES = ["edge-0", "edge-1", "edge-2", "edge-3", "cloud"]
+    NODE_NAMES = ["edge-0", "edge-1", "cloud"]
 
     def __init__(
         self,
         model_path:        str   = "models/checkpoints/dqn_best.pth",
-        n_edge_nodes:      int   = 3,
+        n_edge_nodes:      int   = 2,
         prometheus_url:    str   = "http://localhost:9090",
         dispatch_interval: float = 1.0,
         demo_mode:         bool  = False,

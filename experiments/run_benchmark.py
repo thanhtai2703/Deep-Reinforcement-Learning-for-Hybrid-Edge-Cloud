@@ -292,7 +292,7 @@ def main():
     os.makedirs("results", exist_ok=True)
     os.makedirs("experiments/plots", exist_ok=True)
 
-    env = BenchmarkEnv(n_edge_nodes=3, max_steps=99999)
+    env = BenchmarkEnv(n_edge_nodes=2, max_steps=99999)
     env.reset(seed=0)
     obs_dim   = env.observation_space.shape[0]
     n_actions = env.action_space.n
@@ -314,7 +314,7 @@ def main():
         except ImportError:
             pass
 
-    for p in get_all_baselines(n_actions, 3):
+    for p in get_all_baselines(n_actions, 2):
         policies[p.name] = (p.select_action, False)
 
     # ── Run benchmark ──────────────────────────────────────────────────────
