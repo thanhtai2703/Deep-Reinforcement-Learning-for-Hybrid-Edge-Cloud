@@ -11,7 +11,7 @@ register(
     id="EdgeCloud-v0",
     entry_point="rl_env.edge_cloud_env:EdgeCloudEnv",
     kwargs={
-        "n_edge_nodes": 3,
+        "n_edge_nodes": 2,
         "use_prometheus": False,
         "max_steps": 200,
     },

@@ -39,6 +39,7 @@ RESET  = "\033[0m"
 BOLD   = "\033[1m"
 
 _results = []
+TEST_EDGE_NODES = 2
 
 def test(name: str):
     """Decorator – đăng ký test case."""
@@ -83,12 +84,12 @@ def run_all():
 
 @test("Env khởi tạo không lỗi")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     assert env is not None
 
 @test("reset() trả về (obs, info) đúng kiểu")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3, seed=0)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     result = env.reset(seed=42)
     assert isinstance(result, tuple) and len(result) == 2
     obs, info = result
@@ -97,7 +98,7 @@ def _():
 
 @test("step() trả về 5-tuple đúng chuẩn Gymnasium")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     env.reset(seed=0)
     result = env.step(0)
     assert len(result) == 5
@@ -131,14 +132,14 @@ def _():
 
 @test("Observation nằm trong [0, 1] sau reset")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     obs, _ = env.reset(seed=7)
     assert obs.min() >= 0.0, f"obs.min() = {obs.min()}"
     assert obs.max() <= 1.0, f"obs.max() = {obs.max()}"
 
 @test("Observation nằm trong [0, 1] sau 200 steps")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     obs, _ = env.reset(seed=42)
     for _ in range(200):
         action = env.action_space.sample()
@@ -150,13 +151,13 @@ def _():
 
 @test("Observation dtype là float32")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     obs, _ = env.reset(seed=1)
     assert obs.dtype == np.float32, f"dtype = {obs.dtype}"
 
 @test("Observation không có NaN hay Inf")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     obs, _ = env.reset(seed=99)
     for _ in range(100):
         obs, _, t, tr, _ = env.step(env.action_space.sample())
@@ -172,14 +173,14 @@ def _():
 
 @test("Reward là scalar float")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     env.reset(seed=0)
     _, reward, _, _, _ = env.step(0)
     assert isinstance(reward, (float, np.floating)), f"type={type(reward)}"
 
 @test("Reward không phải NaN hay Inf")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     env.reset(seed=5)
     for _ in range(200):
         _, reward, t, tr, _ = env.step(env.action_space.sample())
@@ -189,7 +190,7 @@ def _():
 
 @test("Reward nằm trong range hợp lý [-5, 2]")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     env.reset(seed=10)
     rewards = []
     for _ in range(500):
@@ -203,7 +204,7 @@ def _():
 
 @test("SLA met → reward cao hơn SLA missed")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     # Chạy nhiều steps, kiểm tra correlation reward vs sla_met
     env.reset(seed=77)
     sla_met_rewards, sla_miss_rewards = [], []
@@ -227,7 +228,7 @@ def _():
 @test("Episode kết thúc đúng lúc (truncated tại max_steps)")
 def _():
     max_steps = 50
-    env = EdgeCloudEnv(n_edge_nodes=3, max_steps=max_steps)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES, max_steps=max_steps)
     env.reset(seed=0)
     steps = 0
     truncated = False
@@ -240,7 +241,7 @@ def _():
 
 @test("reset() reset lại step counter")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3, max_steps=10)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES, max_steps=10)
     env.reset(seed=0)
     for _ in range(10):
         _, _, _, truncated, _ = env.step(env.action_space.sample())
@@ -256,7 +257,7 @@ def _():
 
 @test("info dict chứa đủ keys cần thiết")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     env.reset(seed=0)
     _, _, _, _, info = env.step(0)
     required_keys = {"latency", "cost", "sla_met", "action", "is_cloud"}
@@ -265,7 +266,7 @@ def _():
 
 @test("Action invalid bị báo lỗi")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     env.reset()
     try:
         env.step(999)
@@ -281,7 +282,7 @@ def _():
 @test("Cùng seed → cùng trajectory (deterministic)")
 def _():
     def collect(seed):
-        env = EdgeCloudEnv(n_edge_nodes=3, max_steps=30)
+        env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES, max_steps=30)
         obs, _ = env.reset(seed=seed)
         rewards = []
         rng = np.random.default_rng(seed)
@@ -300,7 +301,7 @@ def _():
 @test("Khác seed → khác trajectory")
 def _():
     def collect(seed):
-        env = EdgeCloudEnv(n_edge_nodes=3, max_steps=30)
+        env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES, max_steps=30)
         obs, _ = env.reset(seed=seed)
         rewards = []
         rng = np.random.default_rng(seed)
@@ -323,7 +324,7 @@ def _():
 
 @test("Cloud action (action=n_edge) → is_cloud=True trong info")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     env.reset(seed=0)
     cloud_action = env.n_edge_nodes   # = 3
     _, _, _, _, info = env.step(cloud_action)
@@ -331,14 +332,14 @@ def _():
 
 @test("Edge action → is_cloud=False trong info")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     env.reset(seed=0)
     _, _, _, _, info = env.step(0)   # Edge node 0
     assert info["is_cloud"] is False
 
 @test("Latency luôn dương")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     env.reset(seed=0)
     for _ in range(100):
         _, _, t, tr, info = env.step(env.action_space.sample())
@@ -347,7 +348,7 @@ def _():
 
 @test("Cost luôn dương")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     env.reset(seed=0)
     for _ in range(100):
         _, _, t, tr, info = env.step(env.action_space.sample())
@@ -359,7 +360,7 @@ def _():
 # 7. RANDOM POLICY EVALUATION (1000 episodes)
 # ──────────────────────────────────────────────────────────────────────────
 
-def evaluate_random_policy(n_episodes: int = 1000, n_edge_nodes: int = 3) -> dict:
+def evaluate_random_policy(n_episodes: int = 1000, n_edge_nodes: int = TEST_EDGE_NODES) -> dict:
     """
     Chạy Random policy qua n_episodes episode, thu thập thống kê.
     Đây là bước validate quan trọng trước khi train RL.
@@ -428,7 +429,7 @@ def _():
 
 @test("Tất cả baseline policies chạy không lỗi (100 episodes)")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     baselines = get_all_baselines(env.action_space.n, env.n_edge_nodes)
     for policy in baselines:
         for ep in range(10):
@@ -442,7 +443,7 @@ def _():
 
 @test("CloudOnlyPolicy luôn chọn action = n_edge")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     policy = CloudOnlyPolicy(env.action_space.n, env.n_edge_nodes)
     obs, _ = env.reset(seed=0)
     for _ in range(50):
@@ -453,7 +454,7 @@ def _():
 
 @test("EdgeOnlyPolicy không bao giờ chọn Cloud")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     policy = EdgeOnlyPolicy(env.action_space.n, env.n_edge_nodes)
     obs, _ = env.reset(seed=0)
     for _ in range(50):
@@ -464,14 +465,14 @@ def _():
 
 @test("RoundRobin xoay đúng thứ tự")
 def _():
-    env = EdgeCloudEnv(n_edge_nodes=3)
+    env = EdgeCloudEnv(n_edge_nodes=TEST_EDGE_NODES)
     policy = RoundRobinPolicy(env.action_space.n, env.n_edge_nodes)
     obs, _ = env.reset(seed=0)
     actions = []
     for i in range(8):
         actions.append(policy.select_action(obs))
-    # Phải là [0,1,2,3,0,1,2,3]
-    expected = [i % 4 for i in range(8)]
+    # Phải lặp theo số action hiện tại (2 Edge + 1 Cloud => [0,1,2,...])
+    expected = [i % env.action_space.n for i in range(8)]
     assert actions == expected, f"RoundRobin order wrong: {actions}"
 
 

@@ -33,7 +33,7 @@ from models.dqn_agent import DQNAgent, DQNConfig
 # ---------------------------------------------------------------------------
 TRAIN_CONFIG = {
     "n_episodes":    1000,     # Tổng số episode training
-    "n_edge_nodes":  3,
+    "n_edge_nodes":  2,
     "max_steps":     200,
     "eval_interval": 50,       # Đánh giá mỗi N episode
     "eval_episodes": 20,       # Số episode dùng để đánh giá

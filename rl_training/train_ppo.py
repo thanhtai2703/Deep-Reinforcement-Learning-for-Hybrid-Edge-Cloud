@@ -49,7 +49,7 @@ from rl_env.edge_cloud_env import EdgeCloudEnv
 
 PPO_CONFIG = {
     # Môi trường
-    "n_edge_nodes":   3,
+    "n_edge_nodes":   2,
     "max_steps":      200,
     "n_envs":         4,           # Số envs song song (vectorized)
 
@@ -207,7 +207,7 @@ def run_reward_tuning(n_steps: int = 50_000) -> dict:
 
         # Patch reward weights vào env (monkey-patch đơn giản)
         def make_env(lw=lat_w, cw=cost_w):
-            env = EdgeCloudEnv(n_edge_nodes=3, max_steps=200)
+            env = EdgeCloudEnv(n_edge_nodes=2, max_steps=200)
             # Override _compute_reward để test different weights
             original_reward = env._compute_reward
 

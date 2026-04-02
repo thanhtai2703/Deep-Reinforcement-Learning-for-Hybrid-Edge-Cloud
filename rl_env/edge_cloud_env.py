@@ -18,7 +18,7 @@ class EdgeCloudEnv(gym.Env):
 
     Parameters
     ----------
-    n_edge_nodes   : số lượng Edge node (mặc định 3 – mô phỏng cụm K3s)
+    n_edge_nodes   : số lượng Edge node (mặc định 2 – mô phỏng 2 VM Edge)
     use_prometheus : True → đọc metrics thật từ Prometheus
     prometheus_url : URL của Prometheus server
     max_steps      : số bước tối đa mỗi episode
@@ -28,7 +28,7 @@ class EdgeCloudEnv(gym.Env):
 
     def __init__(
         self,
-        n_edge_nodes: int = 3,
+        n_edge_nodes: int = 2,
         use_prometheus: bool = False,
         prometheus_url: str = "http://localhost:9090",
         max_steps: int = 200,
