@@ -19,9 +19,9 @@ class BasePolicy:
     """Interface chuẩn cho mọi policy."""
 
     def __init__(self, n_actions: int, n_edge_nodes: int):
-        self.n_actions    = n_actions       # n_edge + 1 cloud
+        self.n_actions = n_actions       # n_edge + 1 cloud
         self.n_edge_nodes = n_edge_nodes
-        self.name         = "BasePolicy"
+        self.name = "BasePolicy"
 
     def select_action(self, obs: np.ndarray) -> int:
         raise NotImplementedError
@@ -43,7 +43,7 @@ class RandomPolicy(BasePolicy):
     def __init__(self, n_actions: int, n_edge_nodes: int, seed: int = 42):
         super().__init__(n_actions, n_edge_nodes)
         self.name = "Random"
-        self.rng  = np.random.default_rng(seed)
+        self.rng = np.random.default_rng(seed)
 
     def select_action(self, obs: np.ndarray) -> int:
         return int(self.rng.integers(0, self.n_actions))
@@ -60,11 +60,11 @@ class RoundRobinPolicy(BasePolicy):
 
     def __init__(self, n_actions: int, n_edge_nodes: int):
         super().__init__(n_actions, n_edge_nodes)
-        self.name    = "RoundRobin"
+        self.name = "RoundRobin"
         self._cursor = 0
 
     def select_action(self, obs: np.ndarray) -> int:
-        action       = self._cursor
+        action = self._cursor
         self._cursor = (self._cursor + 1) % self.n_actions
         return action
 
@@ -157,7 +157,7 @@ class ThresholdPolicy(BasePolicy):
         cpu_threshold: float = 0.7,   # 70% CPU → xem là quá tải
     ):
         super().__init__(n_actions, n_edge_nodes)
-        self.name          = f"Threshold(cpu<{int(cpu_threshold*100)}%)"
+        self.name = f"Threshold(cpu<{int(cpu_threshold*100)}%)"
         self.cpu_threshold = cpu_threshold
 
     def select_action(self, obs: np.ndarray) -> int:

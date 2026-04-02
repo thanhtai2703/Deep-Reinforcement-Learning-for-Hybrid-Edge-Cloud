@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from rl_env.edge_cloud_env import EdgeCloudEnv
 from rl_env.baseline_policies import (
-    RandomPolicy, RoundRobinPolicy, LeastConnectionPolicy,
+    RandomPolicy, RoundRobinPolicy,
     EdgeOnlyPolicy, CloudOnlyPolicy, get_all_baselines,
 )
 
@@ -40,6 +40,7 @@ BOLD   = "\033[1m"
 
 _results = []
 TEST_EDGE_NODES = 2
+
 
 def test(name: str):
     """Decorator – đăng ký test case."""
@@ -186,7 +187,8 @@ def _():
         _, reward, t, tr, _ = env.step(env.action_space.sample())
         assert not np.isnan(reward), "Reward is NaN"
         assert not np.isinf(reward), "Reward is Inf"
-        if t or tr: break
+        if t or tr:
+            break
 
 @test("Reward nằm trong range hợp lý [-5, 2]")
 def _():
@@ -344,7 +346,8 @@ def _():
     for _ in range(100):
         _, _, t, tr, info = env.step(env.action_space.sample())
         assert info["latency"] > 0, f"Latency = {info['latency']}"
-        if t or tr: break
+        if t or tr:
+            break
 
 @test("Cost luôn dương")
 def _():
@@ -353,7 +356,8 @@ def _():
     for _ in range(100):
         _, _, t, tr, info = env.step(env.action_space.sample())
         assert info["cost"] > 0, f"Cost = {info['cost']}"
-        if t or tr: break
+        if t or tr:
+            break
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -450,7 +454,8 @@ def _():
         action = policy.select_action(obs)
         assert action == env.n_edge_nodes, f"Expected cloud action={env.n_edge_nodes}, got {action}"
         obs, _, t, tr, _ = env.step(action)
-        if t or tr: break
+        if t or tr:
+            break
 
 @test("EdgeOnlyPolicy không bao giờ chọn Cloud")
 def _():
@@ -461,7 +466,8 @@ def _():
         action = policy.select_action(obs)
         assert action < env.n_edge_nodes, f"EdgeOnly chọn Cloud! action={action}"
         obs, _, t, tr, _ = env.step(action)
-        if t or tr: break
+        if t or tr:
+            break
 
 @test("RoundRobin xoay đúng thứ tự")
 def _():
