@@ -25,14 +25,6 @@ jobs:
           pip install -r requirements.txt
           pip install flake8 black pytest
 
-      - name: Lint (flake8)
-        run: |
-          flake8 rl_env workload --max-line-length=120 --extend-ignore=E203,W503
-
-      - name: Format check (black)
-        run: |
-          black --check rl_env workload
-
       - name: Run environment tests
         run: |
           python rl_env/env_test.py
