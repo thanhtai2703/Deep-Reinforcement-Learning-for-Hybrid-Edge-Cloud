@@ -1,0 +1,38 @@
+groups:
+  - name: hybrid-edge-cloud-alerts
+    rules:
+      - alert: HighCPUUsage
+        expr: 100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU cao trên {{ $labels.instance }}"
+          description: "CPU usage > 90% trong hơn 5 phút."
+
+      - alert: HighMemoryUsage
+        expr: 100 * (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RAM cao trên {{ $labels.instance }}"
+          description: "RAM usage > 90% trong hơn 5 phút."
+
+      - alert: PrometheusTargetDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Target down: {{ $labels.instance }}"
+          description: "Prometheus không scrape được target này trong hơn 2 phút."
+
+      - alert: HighNetworkLatency
+        expr: edge_cloud_rtt_ms > 80
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Latency cao giữa edge và cloud"
+          description: "RTT vượt ngưỡng 80 ms trong hơn 3 phút."
