@@ -11,19 +11,28 @@ State vector gồm 12 chiều (với 2 edge nodes):
 
 Tất cả giá trị được normalize về [0, 1].
 
+Prometheus metrics được lấy qua PrometheusClient của Person 1
+(week2/prometheus_client.py).
+
 Hỗ trợ 2 chế độ:
-  - Prometheus mode: query metrics thật từ Prometheus server
+  - Prometheus mode: query metrics thật qua Person 1 client
   - Simulation mode: dùng giá trị giả lập (demo/test)
 """
 
 from __future__ import annotations
 
 import logging
-import time
+import os
+import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import numpy as np
+
+# Thêm project root vào path để import week2
+_PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 logger = logging.getLogger("StateBuilder")
 
@@ -54,72 +63,6 @@ class TaskInfo:
     payload_type: str = "compute"
 
 
-class PrometheusClient:
-    """
-    Client đọc metrics từ Prometheus server.
-
-    Fallback sang giá trị mặc định nếu Prometheus không khả dụng.
-    """
-
-    def __init__(self, url: str = "http://localhost:9090", timeout: float = 2.0):
-        self.url = url.rstrip("/")
-        self.timeout = timeout
-        self._session = None
-        self._last_metrics: Dict[str, NodeMetrics] = {}
-        self._init_session()
-
-    def _init_session(self):
-        try:
-            import requests
-            self._session = requests.Session()
-            self._session.headers.update({"Accept": "application/json"})
-        except ImportError:
-            logger.warning("requests not installed - Prometheus queries disabled")
-
-    def query(self, promql: str) -> Optional[float]:
-        """Execute a PromQL instant query, return scalar value or None."""
-        if self._session is None:
-            return None
-        try:
-            r = self._session.get(
-                f"{self.url}/api/v1/query",
-                params={"query": promql},
-                timeout=self.timeout,
-            )
-            r.raise_for_status()
-            result = r.json()["data"]["result"]
-            if result:
-                return float(result[0]["value"][1])
-            return None
-        except Exception as e:
-            logger.debug("Prometheus query failed (%s): %s", promql, e)
-            return None
-
-    def get_node_metrics(self, node_name: str) -> NodeMetrics:
-        """
-        Lấy CPU, RAM, Latency cho một node.
-
-        PromQL labels chuẩn:
-          node="edge_1", node="edge_2", node="cloud"
-        """
-        cpu = self.query(f'node_cpu_usage_percent{{node="{node_name}"}}')
-        ram = self.query(f'node_memory_usage_percent{{node="{node_name}"}}')
-        lat = self.query(f'node_latency_ms{{node="{node_name}"}}')
-
-        metrics = NodeMetrics(
-            cpu_percent=cpu if cpu is not None else 0.0,
-            ram_percent=ram if ram is not None else 0.0,
-            latency_ms=lat if lat is not None else 0.0,
-        )
-
-        self._last_metrics[node_name] = metrics
-        return metrics
-
-    def get_cached(self, node_name: str) -> NodeMetrics:
-        """Trả về metrics đã cache nếu có, fallback sang default."""
-        return self._last_metrics.get(node_name, NodeMetrics())
-
-
 class StateBuilder:
     """
     Xây dựng state vector normalized [0, 1] từ metrics thực
@@ -127,9 +70,14 @@ class StateBuilder:
 
     Parameters
     ----------
-    n_edge_nodes   : số edge nodes (default 2)
-    prometheus_url : URL Prometheus server
-    use_prometheus : True = query Prometheus thật
+    n_edge_nodes    : số edge nodes (default 2)
+    prometheus_url  : URL Prometheus server
+    use_prometheus  : True = query Prometheus thật qua Person 1 client
+    instance_map    : mapping Prometheus instance → node role
+                      VD: {"192.168.1.100:9100": "edge_1",
+                           "192.168.1.101:9100": "edge_2",
+                           "10.0.0.50:9100": "cloud"}
+                      Nếu không truyền sẽ tự gán theo thứ tự.
     """
 
     # Node names mapping: action index → node name
@@ -140,13 +88,29 @@ class StateBuilder:
         n_edge_nodes: int = 2,
         prometheus_url: str = "http://localhost:9090",
         use_prometheus: bool = False,
+        instance_map: Optional[Dict[str, str]] = None,
     ):
         self.n_edge_nodes = n_edge_nodes
         self.use_prometheus = use_prometheus
         self.obs_dim = n_edge_nodes * 3 + 3 + 3  # edges + cloud + task
 
-        # Prometheus client
-        self._prom = PrometheusClient(prometheus_url) if use_prometheus else None
+        # Mapping: Prometheus instance (IP:port) → role (edge_1, edge_2, cloud)
+        self._instance_map = instance_map or {}
+
+        # Person 1's Prometheus client (week2/prometheus_client.py)
+        self._prom_client = None
+        if use_prometheus:
+            try:
+                from week2.prometheus_client import PrometheusClient, PrometheusConfig
+                config = PrometheusConfig(base_url=prometheus_url, timeout_seconds=5)
+                self._prom_client = PrometheusClient(config)
+                logger.info("Using Person 1 PrometheusClient: %s", prometheus_url)
+            except ImportError:
+                logger.warning(
+                    "week2.prometheus_client not found — "
+                    "falling back to simulation"
+                )
+                self.use_prometheus = False
 
         # Internal state cache (dùng cho simulation hoặc cache khi prom fail)
         self._edge_metrics: List[NodeMetrics] = [
@@ -263,20 +227,56 @@ class StateBuilder:
     # ------------------------------------------------------------------
 
     def _fetch_prometheus_metrics(self):
-        """Query Prometheus cho tất cả nodes."""
-        for i in range(self.n_edge_nodes):
-            node_name = f"edge_{i + 1}"
-            m = self._prom.get_node_metrics(node_name)
-            if m.cpu_percent > 0 or m.ram_percent > 0:
-                self._edge_metrics[i] = m
-            else:
-                logger.debug("Prometheus returned empty for %s, using cache", node_name)
+        """
+        Query Prometheus qua Person 1 client (get_dispatcher_metrics).
 
-        m = self._prom.get_node_metrics("cloud")
-        if m.cpu_percent > 0 or m.ram_percent > 0:
-            self._cloud_metrics = m
-        else:
-            logger.debug("Prometheus returned empty for cloud, using cache")
+        Person 1 trả về dict dạng:
+          {"192.168.1.100:9100": {"cpu_usage_pct": 45.2, "ram_usage_pct": 67.8,
+                                   "queue_length": 3, "network_latency_ms": 12.5}, ...}
+
+        Dùng instance_map để map IP:port → edge_1/edge_2/cloud.
+        """
+        try:
+            raw = self._prom_client.get_dispatcher_metrics()
+        except Exception as e:
+            logger.warning("Prometheus query failed: %s — using cached state", e)
+            return
+
+        if not raw:
+            logger.debug("Prometheus returned empty, using cache")
+            return
+
+        # Đảo ngược: role → instance
+        role_to_inst = {v: k for k, v in self._instance_map.items()}
+
+        # Nếu không có instance_map, gán theo thứ tự alphabetical
+        if not role_to_inst:
+            instances = sorted(raw.keys())
+            roles = [f"edge_{i + 1}" for i in range(self.n_edge_nodes)] + ["cloud"]
+            for inst, role in zip(instances, roles):
+                role_to_inst[role] = inst
+
+        # Cập nhật edge metrics
+        for i in range(self.n_edge_nodes):
+            role = f"edge_{i + 1}"
+            inst = role_to_inst.get(role)
+            if inst and inst in raw:
+                d = raw[inst]
+                self._edge_metrics[i] = NodeMetrics(
+                    cpu_percent=d.get("cpu_usage_pct") or 0.0,
+                    ram_percent=d.get("ram_usage_pct") or 0.0,
+                    latency_ms=d.get("network_latency_ms") or 0.0,
+                )
+
+        # Cập nhật cloud metrics
+        inst = role_to_inst.get("cloud")
+        if inst and inst in raw:
+            d = raw[inst]
+            self._cloud_metrics = NodeMetrics(
+                cpu_percent=d.get("cpu_usage_pct") or 0.0,
+                ram_percent=d.get("ram_usage_pct") or 0.0,
+                latency_ms=d.get("network_latency_ms") or 0.0,
+            )
 
     def _compose_observation(self, task: TaskInfo) -> np.ndarray:
         """Compose và normalize observation vector."""
@@ -309,12 +309,3 @@ class StateBuilder:
         arr = np.array(obs, dtype=np.float32)
         return np.clip(arr, 0.0, 1.0)
 
-    def handle_missing_data(self, node_name: str) -> NodeMetrics:
-        """Fallback cho missing data: dùng cache hoặc default."""
-        if self._prom is not None:
-            cached = self._prom.get_cached(node_name)
-            if cached.cpu_percent > 0:
-                logger.debug("Using cached metrics for %s", node_name)
-                return cached
-        logger.warning("No metrics available for %s, using defaults", node_name)
-        return NodeMetrics(cpu_percent=50.0, ram_percent=50.0, latency_ms=50.0)
