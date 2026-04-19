@@ -102,14 +102,27 @@ def run_comparison(args):
     tasks = generate_tasks(args.num_tasks, seed=args.seed)
     policies = sorted(BASELINE_NAMES)
 
-    # Thêm DQN nếu có model
+    # Map policy_name → model_path cho các RL model
+    rl_models: dict = {}
+    if args.ppo_model and os.path.exists(args.ppo_model):
+        rl_models["ppo"] = args.ppo_model
+    if args.dqn_model and os.path.exists(args.dqn_model):
+        rl_models["dqn"] = args.dqn_model
+    # Legacy: --model tự detect theo extension
     if args.model and os.path.exists(args.model):
-        policies = ["dqn"] + policies
+        if args.model.endswith(".zip") and "ppo" not in rl_models:
+            rl_models["ppo"] = args.model
+        elif args.model.endswith(".pth") and "dqn" not in rl_models:
+            rl_models["dqn"] = args.model
+
+    # RL models đứng đầu bảng
+    rl_order = [p for p in ("ppo", "dqn") if p in rl_models]
+    policies = rl_order + policies
 
     results = {}
 
     for policy_name in policies:
-        model_path = args.model if policy_name in ("dqn", "ppo") else None
+        model_path = rl_models.get(policy_name)
 
         dispatcher = SmartDispatcher(
             policy_name=policy_name,
@@ -131,12 +144,13 @@ def run_comparison(args):
         )
 
     # Print comparison table
+    rl_names = set(rl_models.keys())
     print(f"\n{'=' * 80}")
     print(f"{'Policy':<20} {'SLA%':>8} {'Avg Lat(ms)':>12} "
           f"{'P95 Lat(ms)':>12} {'Avg Cost':>10} {'Cloud%':>8}")
     print(f"{'-' * 80}")
     for name, s in results.items():
-        marker = " <--" if name in ("dqn", "ppo") else ""
+        marker = " <-- RL" if name in rl_names else ""
         print(
             f"{name:<20} {s['sla_rate']:>8.1f} {s['avg_latency_ms']:>12.1f} "
             f"{s['p95_latency_ms']:>12.1f} {s['avg_cost']:>10.5f} "
@@ -167,7 +181,15 @@ def main():
     )
     parser.add_argument(
         "--model", default=None,
-        help="Path to model checkpoint (required for dqn/ppo)",
+        help="Path to model checkpoint — auto-detect ppo (.zip) or dqn (.pth)",
+    )
+    parser.add_argument(
+        "--ppo-model", default=None,
+        help="Path to PPO checkpoint (.zip) — dùng với --compare",
+    )
+    parser.add_argument(
+        "--dqn-model", default=None,
+        help="Path to DQN checkpoint (.pth) — dùng với --compare",
     )
     parser.add_argument(
         "--num-tasks", type=int, default=50,
