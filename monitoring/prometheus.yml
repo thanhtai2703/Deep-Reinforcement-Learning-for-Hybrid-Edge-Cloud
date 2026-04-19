@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Dispatcher metrics (chạy trên máy host)
+  - job_name: "dispatcher"
+    static_configs:
+      - targets:
+          # host.docker.internal = máy host từ trong Docker container
+          - "host.docker.internal:8000"
+    metrics_path: /metrics
+
+  - job_name: "edge_1"
+    static_configs:
+      - targets: ["100.82.147.9:9100"]
+        labels:
+          node: "edge_1"
+
+  - job_name: "edge_2"
+    static_configs:
+      - targets: ["100.69.169.33:9100"]
+        labels:
+          node: "edge_2"
+
+  - job_name: "cloud"
+    static_configs:
+      - targets: ["<EC2_IP>:9100"]
+        labels:
+          node: "cloud"

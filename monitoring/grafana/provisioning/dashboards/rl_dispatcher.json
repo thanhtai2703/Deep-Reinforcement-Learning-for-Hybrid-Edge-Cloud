@@ -1,0 +1,124 @@
+{
+  "title": "RL Dispatcher — Hybrid Edge-Cloud",
+  "uid": "rl-dispatcher-v1",
+  "schemaVersion": 38,
+  "refresh": "5s",
+  "time": { "from": "now-5m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "SLA Rate % (by Policy)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0, "max": 100,
+          "thresholds": {
+            "steps": [
+              { "value": 0,  "color": "red" },
+              { "value": 60, "color": "yellow" },
+              { "value": 80, "color": "green" }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "dispatcher_sla_rate",
+          "legendFormat": "{{policy}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Task Latency P95 (ms)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(dispatcher_latency_ms_bucket[1m]))",
+          "legendFormat": "P95 {{policy}}"
+        },
+        {
+          "expr": "histogram_quantile(0.50, rate(dispatcher_latency_ms_bucket[1m]))",
+          "legendFormat": "P50 {{policy}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Tasks/sec (by Node)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "rate(dispatcher_tasks_total[30s])",
+          "legendFormat": "{{policy}} → {{node}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "SLA Miss Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 7 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        {
+          "expr": "rate(dispatcher_sla_miss_total[30s])",
+          "legendFormat": "Miss {{policy}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Simulated Node CPU %",
+      "type": "gauge",
+      "gridPos": { "x": 0, "y": 15, "w": 8, "h": 6 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0, "max": 100,
+          "thresholds": {
+            "steps": [
+              { "value": 0,  "color": "green" },
+              { "value": 70, "color": "yellow" },
+              { "value": 90, "color": "red" }
+            ]
+          }
+        }
+      },
+      "targets": [
+        { "expr": "sim_edge1_cpu_pct", "legendFormat": "Edge-1" },
+        { "expr": "sim_edge2_cpu_pct", "legendFormat": "Edge-2" },
+        { "expr": "sim_cloud_cpu_pct", "legendFormat": "Cloud"  }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Total Tasks Dispatched",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 15, "w": 8, "h": 6 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        {
+          "expr": "sum(dispatcher_tasks_total)",
+          "legendFormat": "Total"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Decision Distribution (Edge vs Cloud)",
+      "type": "piechart",
+      "gridPos": { "x": 16, "y": 15, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum by (node) (dispatcher_tasks_total)",
+          "legendFormat": "{{node}}"
+        }
+      ]
+    }
+  ]
+}

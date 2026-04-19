@@ -125,7 +125,7 @@ class StateBuilder:
 
         Returns: np.ndarray shape (obs_dim,) trong [0, 1]
         """
-        if self.use_prometheus and self._prom is not None:
+        if self.use_prometheus and self._prom_client is not None:
             self._fetch_prometheus_metrics()
         # Nếu không dùng Prometheus, dùng state đã cache (simulation)
 
