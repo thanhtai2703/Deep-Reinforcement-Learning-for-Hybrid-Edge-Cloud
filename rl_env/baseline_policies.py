@@ -8,19 +8,28 @@ Các thuật toán điều phối truyền thống dùng để so sánh với DQ
   - LeastConnectionPolicy: chọn node có CPU thấp nhất (ít tải nhất)
   - EdgeOnlyPolicy      : luôn gửi lên Edge node có tải thấp nhất
   - CloudOnlyPolicy     : luôn gửi lên Cloud
+  - ThresholdPolicy     : edge nếu còn tải, cloud nếu quá tải
 
-Tất cả policy dùng interface chung: policy.select_action(obs) → int
+Lưu ý: Các baseline không bao giờ chọn action 'reject' — đó là khả năng riêng
+của RL agent. Baselines chỉ dispatch tới {edges, cloud}.
+
+State vector: mỗi node chiếm 4 dims (cpu, ram, lat, queue).
 """
 
 import numpy as np
+
+# Mỗi node chiếm 4 dims: cpu, ram, latency, queue
+NODE_DIM = 4
 
 
 class BasePolicy:
     """Interface chuẩn cho mọi policy."""
 
     def __init__(self, n_actions: int, n_edge_nodes: int):
-        self.n_actions = n_actions       # n_edge + 1 cloud
+        self.n_actions = n_actions             # tổng action (gồm reject)
         self.n_edge_nodes = n_edge_nodes
+        # Số action dispatch (không gồm reject) = edges + cloud
+        self.n_dispatch_actions = n_edge_nodes + 1
         self.name = "BasePolicy"
 
     def select_action(self, obs: np.ndarray) -> int:
@@ -38,7 +47,7 @@ class BasePolicy:
 # 1. Random Policy
 # ---------------------------------------------------------------------------
 class RandomPolicy(BasePolicy):
-    """Chọn node hoàn toàn ngẫu nhiên – baseline thấp nhất."""
+    """Chọn node ngẫu nhiên (không bao giờ reject)."""
 
     def __init__(self, n_actions: int, n_edge_nodes: int, seed: int = 42):
         super().__init__(n_actions, n_edge_nodes)
@@ -46,7 +55,7 @@ class RandomPolicy(BasePolicy):
         self.rng = np.random.default_rng(seed)
 
     def select_action(self, obs: np.ndarray) -> int:
-        return int(self.rng.integers(0, self.n_actions))
+        return int(self.rng.integers(0, self.n_dispatch_actions))
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +74,8 @@ class RoundRobinPolicy(BasePolicy):
 
     def select_action(self, obs: np.ndarray) -> int:
         action = self._cursor
-        self._cursor = (self._cursor + 1) % self.n_actions
+        # Xoay vòng qua dispatch actions (edges + cloud), bỏ qua reject
+        self._cursor = (self._cursor + 1) % self.n_dispatch_actions
         return action
 
     def reset(self):
@@ -79,10 +89,11 @@ class LeastConnectionPolicy(BasePolicy):
     """
     Chọn node có CPU thấp nhất trong observation.
 
-    Cấu trúc obs (mỗi node chiếm 3 giá trị: cpu_norm, ram_norm, lat_norm):
-      [e0_cpu, e0_ram, e0_lat, ..., eN_cpu, eN_ram, eN_lat,
-       cloud_cpu, cloud_ram, cloud_lat,
-       task_cpu, task_ram, task_deadline]
+    Cấu trúc obs (mỗi node chiếm 4 giá trị: cpu, ram, lat, queue):
+      [e0_cpu, e0_ram, e0_lat, e0_queue, ..., eN_*,
+       cloud_cpu, cloud_ram, cloud_lat, cloud_queue,
+       task_cpu, task_ram, task_deadline,
+       hour_sin, hour_cos]
     """
 
     def __init__(self, n_actions: int, n_edge_nodes: int):
@@ -91,15 +102,11 @@ class LeastConnectionPolicy(BasePolicy):
 
     def select_action(self, obs: np.ndarray) -> int:
         cpu_loads = []
-
-        # CPU của từng Edge node (index 0, 3, 6, ...)
+        # CPU edge i tại index i * NODE_DIM
         for i in range(self.n_edge_nodes):
-            cpu_loads.append(obs[i * 3])
-
-        # CPU của Cloud node (sau tất cả Edge)
-        cloud_cpu_idx = self.n_edge_nodes * 3
-        cpu_loads.append(obs[cloud_cpu_idx])
-
+            cpu_loads.append(obs[i * NODE_DIM])
+        # CPU cloud tại index n_edge_nodes * NODE_DIM
+        cpu_loads.append(obs[self.n_edge_nodes * NODE_DIM])
         return int(np.argmin(cpu_loads))
 
 
@@ -117,7 +124,7 @@ class EdgeOnlyPolicy(BasePolicy):
         self.name = "EdgeOnly"
 
     def select_action(self, obs: np.ndarray) -> int:
-        edge_cpus = [obs[i * 3] for i in range(self.n_edge_nodes)]
+        edge_cpus = [obs[i * NODE_DIM] for i in range(self.n_edge_nodes)]
         return int(np.argmin(edge_cpus))   # trả về index Edge node
 
 
@@ -162,7 +169,7 @@ class ThresholdPolicy(BasePolicy):
 
     def select_action(self, obs: np.ndarray) -> int:
         for i in range(self.n_edge_nodes):
-            if obs[i * 3] < self.cpu_threshold:
+            if obs[i * NODE_DIM] < self.cpu_threshold:
                 return i   # Edge node còn tài nguyên
 
         # Tất cả Edge bị quá tải → Cloud

@@ -77,7 +77,7 @@ def run_evaluation(policy, env: EdgeCloudEnv, n_episodes: int, is_dqn: bool = Fa
 
         rewards.append(ep_reward)
 
-    n_actions    = env.n_edge_nodes + 1
+    n_actions    = env.n_actions
     action_counts = [action_dist.count(i) for i in range(n_actions)]
     total_actions = len(action_dist)
 

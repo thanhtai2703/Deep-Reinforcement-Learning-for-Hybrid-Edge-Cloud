@@ -94,7 +94,9 @@ class SmartDispatcher:
     ):
         self.policy_name = policy_name
         self.n_edge_nodes = n_edge_nodes
-        self.n_actions = n_edge_nodes + 1
+        # Action space: edge_0..n-1, cloud (n), reject (n+1) → n+2 actions
+        self.reject_action = n_edge_nodes + 1
+        self.n_actions = n_edge_nodes + 2
         self.demo_mode = demo_mode
         self._dispatch_count = 0
         self._results: List[DispatchResult] = []
@@ -117,8 +119,11 @@ class SmartDispatcher:
         if demo_mode:
             self.state_builder.reset_simulation()
 
-        # Model loader
-        obs_dim = n_edge_nodes * 3 + 3 + 3
+        # Model loader — phải khớp với StateBuilder.obs_dim
+        # Per-node: cpu, ram, lat, queue (4 dims)
+        # Task: cpu_req, ram_req, deadline (3 dims)
+        # Temporal: hour_sin, hour_cos (2 dims)
+        obs_dim = n_edge_nodes * 4 + 4 + 3 + 2
         self.model_loader = ModelLoader(
             obs_dim=obs_dim,
             n_actions=self.n_actions,
@@ -169,15 +174,19 @@ class SmartDispatcher:
 
         # 3. Determine node
         node_name = self.state_builder.get_node_name(action)
-        is_cloud = (action == self.n_edge_nodes)
+        is_cloud  = (action == self.n_edge_nodes)
+        is_reject = (action == self.reject_action)
 
-        # 4. Estimate latency & cost
-        latency_est, cost_est, sla_met = self._estimate_execution(
-            action, is_cloud, task
-        )
+        # 4. Estimate latency & cost (reject → không tính execution)
+        if is_reject:
+            latency_est, cost_est, sla_met = 0.0, 0.0, False
+        else:
+            latency_est, cost_est, sla_met = self._estimate_execution(
+                action, is_cloud, task
+            )
 
-        # 5. Execute (real K8s hoặc simulation)
-        if not self.demo_mode:
+        # 5. Execute (real K8s hoặc simulation) — bỏ qua nếu reject
+        if not self.demo_mode and not is_reject:
             self._execute_on_node(task, node_name)
 
         # 6. Update simulation state

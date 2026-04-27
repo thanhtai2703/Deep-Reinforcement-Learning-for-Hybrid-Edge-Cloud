@@ -119,3 +119,6 @@ venv.bak/
 .vscode/
 *.sublime-project
 *.sublime-workspace
+CHECKLIST.md
+IMPROVEMENT.md
+
