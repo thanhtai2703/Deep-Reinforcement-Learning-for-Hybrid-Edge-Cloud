@@ -25,6 +25,6 @@ scrape_configs:
 
   - job_name: "cloud"
     static_configs:
-      - targets: ["13.250.96.247:9100"]
+      - targets: ["54.251.136.126:9100"]
         labels:
           node: "cloud"
