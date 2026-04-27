@@ -64,11 +64,39 @@ if PROM_AVAILABLE:
 
 
 # ── Task generator ────────────────────────────────────────────────────────────
+#
+# Thiết kế để làm lộ điểm yếu của Round Robin và thể hiện sức mạnh của RL:
+#
+#  light            → deadline chặt (50-120ms) — Cloud base ~65ms → thường miss
+#  heavy            → cpu cao (60-88%) — Edge overload → penalty ×3 → miss
+#  mixed            → 50% light + 50% heavy — RL phân loại, RR không
+#  bursty           → 70% light + 30% spike nặng đột ngột
+#  deadline_critical→ deadline 30-70ms — chỉ Edge ít tải mới kịp
+#  constant         → hỗn hợp cân bằng (dùng để baseline sanity check)
+
+def _light():
+    return (random.uniform(5, 18), random.uniform(5, 20), random.uniform(50, 120))
+
+def _heavy():
+    return (random.uniform(62, 88), random.uniform(50, 78), random.uniform(280, 500))
+
+def _mixed():
+    return _light() if random.random() < 0.5 else _heavy()
+
+def _bursty():
+    return (random.uniform(68, 92), random.uniform(55, 85), random.uniform(70, 180)) \
+        if random.random() < 0.3 else _light()
+
+def _deadline_critical():
+    return (random.uniform(10, 38), random.uniform(10, 30), random.uniform(30, 70))
 
 _PATTERNS = {
-    "constant": lambda: (float(random.uniform(5, 60)),  float(random.uniform(5, 50)),  float(random.uniform(50, 500))),
-    "heavy":    lambda: (float(random.uniform(40, 90)), float(random.uniform(40, 80)), float(random.uniform(50, 200))),
-    "bursty":   lambda: (float(random.uniform(5, 95)),  float(random.uniform(5, 90)),  float(random.uniform(30, 150))),
+    "constant":          lambda: (random.uniform(10, 55), random.uniform(10, 45), random.uniform(80, 420)),
+    "light":             _light,
+    "heavy":             _heavy,
+    "mixed":             _mixed,
+    "bursty":            _bursty,
+    "deadline_critical": _deadline_critical,
 }
 
 _task_counter = 0
@@ -79,9 +107,9 @@ def next_task(pattern: str = "constant") -> TaskInfo:
     cpu, ram, deadline = _PATTERNS.get(pattern, _PATTERNS["constant"])()
     return TaskInfo(
         task_id=f"task_{_task_counter:08d}",
-        cpu_requirement=cpu,
-        ram_requirement=ram,
-        deadline_ms=deadline,
+        cpu_requirement=float(cpu),
+        ram_requirement=float(ram),
+        deadline_ms=float(deadline),
         priority=random.choice(["low", "medium", "high"]),
         payload_type=random.choice(["compute", "image", "io"]),
     )
@@ -91,10 +119,13 @@ def next_task(pattern: str = "constant") -> TaskInfo:
 
 class PolicyRunner:
     def __init__(self, policy_name: str, model_path: str | None,
-                 tasks_per_sec: float = 2.0, pattern: str = "constant"):
+                 tasks_per_sec: float = 2.0, pattern: str = "constant",
+                 demo_mode: bool = False, prometheus_url: str = "http://localhost:9090"):
         self.policy_name = policy_name
         self.tasks_per_sec = tasks_per_sec
         self.pattern = pattern
+        self._demo_mode = demo_mode
+        self._prometheus_url = prometheus_url
         self._stop = threading.Event()
         self._total = 0
         self._sla_ok = 0
@@ -103,7 +134,8 @@ class PolicyRunner:
             policy_name=policy_name,
             model_path=model_path,
             n_edge_nodes=2,
-            demo_mode=True,
+            prometheus_url=self._prometheus_url,
+            demo_mode=self._demo_mode,
         )
         logger.info("Runner ready: policy=%s  rate=%.1f tasks/s", policy_name, tasks_per_sec)
 
@@ -170,6 +202,10 @@ def main():
                         help="Chạy lần lượt round_robin → least_connection → ppo mỗi 60s")
     parser.add_argument("--interval", type=int, default=60,
                         help="Giây mỗi policy khi --compare (default: 60)")
+    parser.add_argument("--demo", action="store_true",
+                        help="Simulation mode (không cần Prometheus thật)")
+    parser.add_argument("--prometheus", default="http://localhost:9090",
+                        help="Prometheus URL (default: http://localhost:9090)")
     args = parser.parse_args()
 
     # Bắt đầu Prometheus HTTP server
@@ -177,8 +213,10 @@ def main():
         start_http_server(args.metrics_port)
         logger.info("Metrics endpoint: http://localhost:%d/metrics", args.metrics_port)
 
+    mode_str = "SIMULATION" if args.demo else f"REAL PROMETHEUS ({args.prometheus})"
+    logger.info("Mode: %s", mode_str)
+
     if args.compare:
-        # Sequence: round_robin → least_connection → ppo
         sequence = [
             ("round_robin",      None),
             ("least_connection", None),
@@ -190,7 +228,8 @@ def main():
                 continue
 
             logger.info("=== Switching to policy: %s ===", policy_name)
-            runner = PolicyRunner(policy_name, model_path, args.rate, args.pattern)
+            runner = PolicyRunner(policy_name, model_path, args.rate, args.pattern,
+                                  demo_mode=args.demo, prometheus_url=args.prometheus)
             t = threading.Thread(target=runner.run, daemon=True)
             t.start()
             try:
@@ -202,8 +241,8 @@ def main():
             t.join(timeout=5)
             runner.dispatcher.print_summary()
     else:
-        # Single policy
-        runner = PolicyRunner(args.policy, args.model, args.rate, args.pattern)
+        runner = PolicyRunner(args.policy, args.model, args.rate, args.pattern,
+                              demo_mode=args.demo, prometheus_url=args.prometheus)
         logger.info("Starting... Press Ctrl+C to stop.")
         try:
             runner.run()

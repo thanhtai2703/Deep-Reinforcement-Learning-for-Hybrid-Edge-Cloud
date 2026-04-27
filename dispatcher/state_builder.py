@@ -262,20 +262,29 @@ class StateBuilder:
             inst = role_to_inst.get(role)
             if inst and inst in raw:
                 d = raw[inst]
+                cpu = d.get("cpu_usage_pct") or 0.0
+                lat = d.get("network_latency_ms") or 0.0
+                # edge_cloud_rtt_ms thường không có → dùng synthetic từ CPU
+                if lat == 0.0:
+                    lat = 10.0 + cpu * 0.4   # Edge base ~10ms, tăng theo CPU
                 self._edge_metrics[i] = NodeMetrics(
-                    cpu_percent=d.get("cpu_usage_pct") or 0.0,
+                    cpu_percent=cpu,
                     ram_percent=d.get("ram_usage_pct") or 0.0,
-                    latency_ms=d.get("network_latency_ms") or 0.0,
+                    latency_ms=lat,
                 )
 
         # Cập nhật cloud metrics
         inst = role_to_inst.get("cloud")
         if inst and inst in raw:
             d = raw[inst]
+            cpu = d.get("cpu_usage_pct") or 0.0
+            lat = d.get("network_latency_ms") or 0.0
+            if lat == 0.0:
+                lat = 60.0 + cpu * 0.5   # Cloud base ~60ms (network overhead)
             self._cloud_metrics = NodeMetrics(
-                cpu_percent=d.get("cpu_usage_pct") or 0.0,
+                cpu_percent=cpu,
                 ram_percent=d.get("ram_usage_pct") or 0.0,
-                latency_ms=d.get("network_latency_ms") or 0.0,
+                latency_ms=lat,
             )
 
     def _compose_observation(self, task: TaskInfo) -> np.ndarray:

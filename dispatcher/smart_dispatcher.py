@@ -90,6 +90,7 @@ class SmartDispatcher:
         prometheus_url: str = "http://localhost:9090",
         demo_mode: bool = False,
         db_path: Optional[str] = None,
+        instance_map: Optional[dict] = None,
     ):
         self.policy_name = policy_name
         self.n_edge_nodes = n_edge_nodes
@@ -98,11 +99,20 @@ class SmartDispatcher:
         self._dispatch_count = 0
         self._results: List[DispatchResult] = []
 
+        # Load instance_map từ infra_config nếu không truyền vào
+        if instance_map is None and not demo_mode:
+            try:
+                from dispatcher.infra_config import INSTANCE_MAP
+                instance_map = INSTANCE_MAP
+            except ImportError:
+                pass
+
         # State builder
         self.state_builder = StateBuilder(
             n_edge_nodes=n_edge_nodes,
             prometheus_url=prometheus_url,
             use_prometheus=(not demo_mode),
+            instance_map=instance_map or {},
         )
         if demo_mode:
             self.state_builder.reset_simulation()
@@ -234,25 +244,33 @@ class SmartDispatcher:
         return float(latency), float(cost), bool(sla_met)
 
     def _execute_on_node(self, task: TaskInfo, node_name: str):
-        """
-        Gửi task đến node thật qua K8s API.
-        Person 1 sẽ cung cấp pod_deployer.py để thay thế phần này.
-        """
+        """Gửi task đến HTTP worker thật trên node được chọn."""
         if not self._k8s_breaker.allow_request():
-            logger.warning(
-                "Circuit breaker OPEN for K8s - task %s fallback to logging only",
-                task.task_id,
-            )
+            logger.warning("Circuit breaker OPEN — task %s logged only", task.task_id)
             return
 
         try:
-            # Placeholder: sẽ integrate pod_deployer.py từ Person 1
-            # from k8s_integration.pod_deployer import deploy_task_pod
-            # deploy_task_pod(task.task_id, node_name)
-            logger.info("Task %s → %s (K8s deploy pending integration)", task.task_id, node_name)
+            from dispatcher.infra_config import WORKER_URLS
+            import requests as _requests
+
+            url = WORKER_URLS.get(node_name)
+            if not url:
+                logger.warning("No worker URL for node=%s", node_name)
+                return
+
+            payload = {
+                "task_id":         task.task_id,
+                "cpu_requirement": task.cpu_requirement,
+                "ram_requirement": task.ram_requirement,
+                "deadline_ms":     task.deadline_ms,
+            }
+            resp = _requests.post(url, json=payload, timeout=10)
+            resp.raise_for_status()
+            logger.info("Task %s → %s | worker: %s", task.task_id, node_name, resp.json().get("status"))
             self._k8s_breaker.record_success()
+
         except Exception as e:
-            logger.error("K8s deploy failed for task %s: %s", task.task_id, e)
+            logger.error("Worker call failed task=%s node=%s: %s", task.task_id, node_name, e)
             self._k8s_breaker.record_failure()
 
     # ------------------------------------------------------------------
