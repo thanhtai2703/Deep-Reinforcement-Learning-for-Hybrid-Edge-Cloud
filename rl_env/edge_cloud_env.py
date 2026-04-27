@@ -1,3 +1,5 @@
+import time
+
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
@@ -9,6 +11,10 @@ MAX_LATENCY         = 200.0  # ms – dùng để normalize
 MAX_CPU             = 100.0  # % CPU
 MAX_RAM             = 100.0  # % RAM usage
 MAX_DEADLINE        = 500.0  # ms
+MAX_QUEUE           = 20.0   # Số task tối đa mỗi node có thể queue
+QUEUE_DECAY         = 0.85   # Hệ số decay queue mỗi step (mô phỏng task complete)
+NODE_FAILURE_PROB   = 0.005  # Xác suất 1 edge node fail mỗi step (training robustness)
+REJECT_PENALTY      = -0.5   # Reward cố định khi reject task
 
 
 class EdgeCloudEnv(gym.Env):
@@ -41,18 +47,23 @@ class EdgeCloudEnv(gym.Env):
         self._step_count     = 0
 
         # ------------------------------------------------------------------
-        # Không gian hành động: 0..n_edge_nodes-1 = Edge nodes, n = Cloud
+        # Không gian hành động:
+        #   0..n_edge_nodes-1 = Edge nodes
+        #   n_edge_nodes      = Cloud
+        #   n_edge_nodes + 1  = Reject (drop task khi không khả thi)
         # ------------------------------------------------------------------
-        self.n_actions = n_edge_nodes + 1          # Edge nodes + 1 Cloud
+        self.reject_action = n_edge_nodes + 1
+        self.n_actions = n_edge_nodes + 2          # Edge + Cloud + Reject
         self.action_space = spaces.Discrete(self.n_actions)
 
         # ------------------------------------------------------------------
         # Không gian trạng thái (tất cả normalize về [0, 1])
-        # Với mỗi Edge node: [cpu, ram, latency]
-        # Cloud            : [cpu, ram, latency]
+        # Với mỗi Edge node: [cpu, ram, latency, queue]
+        # Cloud            : [cpu, ram, latency, queue]
         # Task             : [cpu_req, ram_req, deadline]
+        # Temporal         : [hour_sin, hour_cos]
         # ------------------------------------------------------------------
-        obs_dim = n_edge_nodes * 3 + 3 + 3        # nodes + cloud + task
+        obs_dim = n_edge_nodes * 4 + 4 + 3 + 2    # nodes + cloud + task + temporal
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32
         )
@@ -61,9 +72,11 @@ class EdgeCloudEnv(gym.Env):
         self._edge_cpu      = np.zeros(n_edge_nodes)
         self._edge_ram      = np.zeros(n_edge_nodes)
         self._edge_latency  = np.zeros(n_edge_nodes)
+        self._edge_queue    = np.zeros(n_edge_nodes)
         self._cloud_cpu     = 0.0
         self._cloud_ram     = 0.0
         self._cloud_latency = 0.0
+        self._cloud_queue   = 0.0
         self._task          = {"cpu_req": 0.0, "ram_req": 0.0, "deadline": 0.0}
 
     # -----------------------------------------------------------------------
@@ -73,6 +86,8 @@ class EdgeCloudEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self._step_count = 0
+        self._edge_queue  = np.zeros(self.n_edge_nodes)
+        self._cloud_queue = 0.0
         self._refresh_node_metrics()
         self._generate_task()
         obs  = self._build_obs()
@@ -83,17 +98,27 @@ class EdgeCloudEnv(gym.Env):
         assert self.action_space.contains(action), f"Invalid action: {action}"
         self._step_count += 1
 
-        # Xác định node được chọn
-        is_cloud = (action == self.n_edge_nodes)
+        is_reject = (action == self.reject_action)
+        is_cloud  = (action == self.n_edge_nodes)
 
-        # Tính toán kết quả khi gửi task đến node được chọn
-        latency, cost, sla_met = self._simulate_execution(action, is_cloud)
+        if is_reject:
+            # Reject: không dispatch, không cập nhật load
+            latency, cost, sla_met = 0.0, 0.0, False
+            reward = REJECT_PENALTY
+        else:
+            latency, cost, sla_met = self._simulate_execution(action, is_cloud)
+            reward = self._compute_reward(latency, cost, sla_met,
+                                          self._task["deadline"], is_reject=False)
+            self._update_node_load(action, is_cloud)
 
-        # Hàm thưởng
-        reward = self._compute_reward(latency, cost, sla_met)
+        # Inject node failure ngẫu nhiên để training robust với scenario thực tế
+        if self.np_random.random() < NODE_FAILURE_PROB and self.n_edge_nodes > 0:
+            failed = int(self.np_random.integers(self.n_edge_nodes))
+            self._edge_cpu[failed] = 99.0
 
-        # Cập nhật tải node sau khi nhận task
-        self._update_node_load(action, is_cloud)
+        # Decay queue mỗi step (mô phỏng task hoàn thành dần)
+        self._edge_queue  = np.clip(self._edge_queue * QUEUE_DECAY, 0, MAX_QUEUE)
+        self._cloud_queue = float(np.clip(self._cloud_queue * QUEUE_DECAY, 0, MAX_QUEUE))
 
         # Sinh task mới cho bước tiếp theo
         self._generate_task()
@@ -110,17 +135,20 @@ class EdgeCloudEnv(gym.Env):
             "sla_met": sla_met,
             "action": action,
             "is_cloud": is_cloud,
+            "is_reject": is_reject,
         }
         return obs, reward, terminated, truncated, info
 
     def render(self, mode="human"):
         edge_str = " | ".join(
-            f"E{i}(cpu={self._edge_cpu[i]:.1f}% ram={self._edge_ram[i]:.1f}%)"
+            f"E{i}(cpu={self._edge_cpu[i]:.1f}% ram={self._edge_ram[i]:.1f}% "
+            f"q={self._edge_queue[i]:.1f})"
             for i in range(self.n_edge_nodes)
         )
         print(
             f"[Step {self._step_count:3d}] {edge_str} | "
-            f"Cloud(cpu={self._cloud_cpu:.1f}% ram={self._cloud_ram:.1f}%) | "
+            f"Cloud(cpu={self._cloud_cpu:.1f}% ram={self._cloud_ram:.1f}% "
+            f"q={self._cloud_queue:.1f}) | "
             f"Task(cpu={self._task['cpu_req']:.1f} ram={self._task['ram_req']:.1f} "
             f"deadline={self._task['deadline']:.0f}ms)"
         )
@@ -138,25 +166,38 @@ class EdgeCloudEnv(gym.Env):
 
     def _simulate_node_metrics(self, add_noise: bool = False):
         """Sinh metrics giả lập cho Edge nodes và Cloud."""
-        noise = 5.0 if add_noise else 0.0
-        for i in range(self.n_edge_nodes):
-            self._edge_cpu[i]     = np.clip(self._edge_cpu[i] + self.np_random.uniform(-noise, noise), 10, 90)
-            self._edge_ram[i]     = np.clip(self._edge_ram[i] + self.np_random.uniform(-noise, noise), 10, 90)
-            self._edge_latency[i] = np.clip(
-                self.np_random.uniform(5, 30) + (self._edge_cpu[i] * 0.3), 1, MAX_LATENCY
+        if not add_noise:
+            # Init lần đầu (reset): set giá trị ban đầu
+            self._edge_cpu  = self.np_random.uniform(20, 70, self.n_edge_nodes)
+            self._edge_ram  = self.np_random.uniform(30, 80, self.n_edge_nodes)
+            self._cloud_cpu = float(self.np_random.uniform(10, 50))
+            self._cloud_ram = float(self.np_random.uniform(10, 50))
+        else:
+            # Step update: thêm noise vào giá trị hiện tại
+            for i in range(self.n_edge_nodes):
+                self._edge_cpu[i] = np.clip(
+                    self._edge_cpu[i] + self.np_random.uniform(-5, 5), 10, 90
+                )
+                self._edge_ram[i] = np.clip(
+                    self._edge_ram[i] + self.np_random.uniform(-5, 5), 10, 90
+                )
+            self._cloud_cpu = np.clip(
+                self._cloud_cpu + self.np_random.uniform(-5, 5), 5, 80
+            )
+            self._cloud_ram = np.clip(
+                self._cloud_ram + self.np_random.uniform(-5, 5), 5, 80
             )
 
-        if not add_noise:
-            # Init lần đầu
-            self._edge_cpu     = self.np_random.uniform(20, 70, self.n_edge_nodes)
-            self._edge_ram     = self.np_random.uniform(30, 80, self.n_edge_nodes)
-            self._cloud_cpu    = float(self.np_random.uniform(10, 50))
-            self._cloud_ram    = float(self.np_random.uniform(10, 50))
-
-        self._cloud_cpu     = np.clip(self._cloud_cpu + self.np_random.uniform(-noise, noise), 5, 80)
-        self._cloud_ram     = np.clip(self._cloud_ram + self.np_random.uniform(-noise, noise), 5, 80)
+        # Latency re-compute từ CPU (cho cả init và step)
+        for i in range(self.n_edge_nodes):
+            self._edge_latency[i] = float(np.clip(
+                self.np_random.uniform(5, 30) + self._edge_cpu[i] * 0.3,
+                1, MAX_LATENCY,
+            ))
         # Cloud latency cao hơn Edge do network overhead
-        self._cloud_latency = float(self.np_random.uniform(30, 80) + self._cloud_cpu * 0.2)
+        self._cloud_latency = float(
+            self.np_random.uniform(30, 80) + self._cloud_cpu * 0.2
+        )
 
     def _fetch_prometheus_metrics(self):
         """
@@ -228,7 +269,7 @@ class EdgeCloudEnv(gym.Env):
         return float(latency), float(cost), bool(sla_met)
 
     def _update_node_load(self, action: int, is_cloud: bool):
-        """Cập nhật tải CPU/RAM sau khi node nhận task."""
+        """Cập nhật tải CPU/RAM/Queue sau khi node nhận task."""
         task_cpu = self._task["cpu_req"]
         task_ram = self._task["ram_req"]
         decay    = 0.85  # Tải giảm dần theo thời gian (decay)
@@ -236,6 +277,7 @@ class EdgeCloudEnv(gym.Env):
         if is_cloud:
             self._cloud_cpu = np.clip(self._cloud_cpu * decay + task_cpu * 0.3, 5, 99)
             self._cloud_ram = np.clip(self._cloud_ram * decay + task_ram * 0.3, 5, 99)
+            self._cloud_queue = float(np.clip(self._cloud_queue + 1, 0, MAX_QUEUE))
         else:
             self._edge_cpu[action] = np.clip(
                 self._edge_cpu[action] * decay + task_cpu * 0.5, 5, 99
@@ -243,27 +285,42 @@ class EdgeCloudEnv(gym.Env):
             self._edge_ram[action] = np.clip(
                 self._edge_ram[action] * decay + task_ram * 0.5, 5, 99
             )
+            self._edge_queue[action] = float(np.clip(
+                self._edge_queue[action] + 1, 0, MAX_QUEUE
+            ))
 
-    def _compute_reward(self, latency: float, cost: float, sla_met: bool) -> float:
+    def _compute_reward(
+        self,
+        latency: float,
+        cost: float,
+        sla_met: bool,
+        deadline: float,
+        is_reject: bool = False,
+    ) -> float:
         """
         Hàm thưởng cân bằng 3 mục tiêu:
           1. Giảm latency
           2. Giảm chi phí
-          3. Đảm bảo SLA (deadline)
+          3. Đảm bảo SLA — dùng tín hiệu liên tục (tanh) thay vì discrete
 
-        Reward dương khi SLA đạt, âm khi vi phạm.
+        Reward dương khi xong nhanh hơn deadline nhiều, âm khi miss.
         """
-        latency_norm = latency / MAX_LATENCY          # [0, 1]
-        cost_norm    = cost / (CLOUD_COST_PER_UNIT * 110)  # [0, 1]
+        if is_reject:
+            return REJECT_PENALTY
 
-        # Thưởng âm cho latency và cost
-        reward = -0.6 * latency_norm - 0.2 * cost_norm
+        latency_norm = latency / MAX_LATENCY                  # [0, 1]
+        cost_norm    = cost / (CLOUD_COST_PER_UNIT * 110)     # [0, 1]
 
-        # Bonus/Penalty SLA
-        if sla_met:
-            reward += 1.0
-        else:
-            reward -= 2.0   # Vi phạm deadline bị phạt nặng
+        # SLA continuous: slack > 0 nếu kịp deadline, < 0 nếu miss
+        # tanh(3 * slack) → [-1, 1], smooth gradient quanh 0
+        slack      = (deadline - latency) / max(deadline, 1.0)
+        sla_signal = float(np.tanh(3.0 * slack))
+
+        reward = -0.5 * latency_norm - 0.2 * cost_norm + 0.5 * sla_signal
+
+        # Penalty bổ sung khi miss thực sự (cứng hơn để model học tránh)
+        if not sla_met:
+            reward -= 0.5
 
         return float(reward)
 
@@ -275,12 +332,14 @@ class EdgeCloudEnv(gym.Env):
                 self._edge_cpu[i]     / MAX_CPU,
                 self._edge_ram[i]     / MAX_RAM,
                 self._edge_latency[i] / MAX_LATENCY,
+                self._edge_queue[i]   / MAX_QUEUE,
             ])
 
         cloud_obs = [
             self._cloud_cpu     / MAX_CPU,
             self._cloud_ram     / MAX_RAM,
             self._cloud_latency / MAX_LATENCY,
+            self._cloud_queue   / MAX_QUEUE,
         ]
 
         task_obs = [
@@ -289,5 +348,12 @@ class EdgeCloudEnv(gym.Env):
             self._task["deadline"] / MAX_DEADLINE,
         ]
 
-        obs = np.array(edge_obs + cloud_obs + task_obs, dtype=np.float32)
+        # Temporal features — sin/cos của giờ trong ngày (cyclic encoding)
+        # Map sin/cos từ [-1, 1] về [0, 1] để khớp observation_space
+        hour = (time.time() / 3600.0) % 24.0
+        hour_sin = (np.sin(2 * np.pi * hour / 24.0) + 1.0) / 2.0
+        hour_cos = (np.cos(2 * np.pi * hour / 24.0) + 1.0) / 2.0
+        temporal_obs = [hour_sin, hour_cos]
+
+        obs = np.array(edge_obs + cloud_obs + task_obs + temporal_obs, dtype=np.float32)
         return np.clip(obs, 0.0, 1.0)

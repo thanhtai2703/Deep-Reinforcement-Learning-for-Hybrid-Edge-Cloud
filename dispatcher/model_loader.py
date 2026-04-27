@@ -10,7 +10,7 @@ Hỗ trợ:
   - Hot-reload: reload model mới mà không restart dispatcher
 
 Usage:
-    loader = ModelLoader(obs_dim=12, n_actions=3, n_edge_nodes=2)
+    loader = ModelLoader(obs_dim=17, n_actions=4, n_edge_nodes=2)
     loader.load("dqn", "models/checkpoints/dqn_best.pth")
     action, q_values = loader.predict(state_vector)
 """

@@ -44,17 +44,17 @@ TRAIN_CONFIG = {
 }
 
 DQN_HYPERPARAMS = DQNConfig(
-    hidden_dim        = 128,
-    n_layers          = 3,
-    lr                = 1e-3,
-    gamma             = 0.99,
-    batch_size        = 64,
-    buffer_size       = 10_000,
-    min_buffer_size   = 500,
-    target_update_freq= 100,
-    eps_start         = 1.0,
-    eps_end           = 0.05,
-    eps_decay         = 0.995,
+    hidden_dim      = 128,
+    n_layers        = 3,
+    lr              = 1e-3,
+    gamma           = 0.99,
+    batch_size      = 64,
+    buffer_size     = 50_000,
+    min_buffer_size = 2_000,
+    tau             = 0.005,
+    eps_start       = 1.0,
+    eps_end         = 0.05,
+    eps_decay       = 0.995,
 )
 
 

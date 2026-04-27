@@ -31,12 +31,12 @@ class DQNConfig:
     n_layers:   int   = 3        # Số hidden layers
 
     # Training
-    lr:              float = 1e-3    # Learning rate
-    gamma:           float = 0.99   # Discount factor
+    lr:              float = 1e-3     # Learning rate
+    gamma:           float = 0.99    # Discount factor
     batch_size:      int   = 64
-    buffer_size:     int   = 10_000  # Dung lượng Replay Buffer
-    min_buffer_size: int   = 500    # Bắt đầu train khi buffer đủ lớn
-    target_update_freq: int = 100   # Cập nhật target network mỗi N bước
+    buffer_size:     int   = 50_000  # Dung lượng Replay Buffer
+    min_buffer_size: int   = 2_000   # Bắt đầu train khi buffer đủ lớn
+    tau:             float = 0.005   # Polyak averaging cho soft target update
 
     # Epsilon-greedy exploration
     eps_start: float = 1.0
@@ -124,7 +124,7 @@ class ReplayBuffer:
 
     @property
     def is_ready(self) -> bool:
-        return len(self.buffer) >= 500
+        return len(self.buffer) >= 2_000
 
 
 # ---------------------------------------------------------------------------
@@ -220,10 +220,14 @@ class DQNAgent:
         q_values = self.q_net(states_t)
         q_sa     = q_values.gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
-        # Q target: r + γ * max_a' Q_target(s', a') * (1 - done)
+        # Double DQN target:
+        #   action chọn từ Q-network online → giảm overestimation bias
+        #   value lấy từ target network
+        # q_target = r + γ * Q_target(s', argmax_a' Q_online(s', a')) * (1 - done)
         with torch.no_grad():
-            next_q      = self.target_net(next_states_t).max(dim=1)[0]
-            q_target    = rewards_t + self.config.gamma * next_q * (1 - dones_t)
+            next_actions = self.q_net(next_states_t).argmax(dim=1, keepdim=True)
+            next_q       = self.target_net(next_states_t).gather(1, next_actions).squeeze(1)
+            q_target     = rewards_t + self.config.gamma * next_q * (1 - dones_t)
 
         loss = self.loss_fn(q_sa, q_target)
 
@@ -235,9 +239,8 @@ class DQNAgent:
 
         self._step_cnt += 1
 
-        # Hard update target network
-        if self._step_cnt % self.config.target_update_freq == 0:
-            self._update_target()
+        # Soft target update (Polyak averaging) — thay cho hard update mỗi N step
+        self._soft_update(self.config.tau)
 
         loss_val = loss.item()
         self.loss_history.append(loss_val)
@@ -250,9 +253,19 @@ class DQNAgent:
             self.epsilon * self.config.eps_decay
         )
 
-    def _update_target(self):
-        """Hard copy weights từ Q-network sang Target network."""
-        self.target_net.load_state_dict(self.q_net.state_dict())
+    def _soft_update(self, tau: float):
+        """
+        Soft target update (Polyak averaging):
+          target_params ← τ * online_params + (1 - τ) * target_params
+
+        Mượt hơn hard update, là default modern (DDPG, SAC, TD3).
+        """
+        for target_param, online_param in zip(
+            self.target_net.parameters(), self.q_net.parameters()
+        ):
+            target_param.data.copy_(
+                tau * online_param.data + (1.0 - tau) * target_param.data
+            )
 
     # -----------------------------------------------------------------------
     # Save / Load

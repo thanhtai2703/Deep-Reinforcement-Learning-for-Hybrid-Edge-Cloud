@@ -61,21 +61,24 @@ def generate_constant_load(
     start_time: datetime | None = None,
     seed: int = 42,
 ) -> List[Task]:
-    """Generate tasks with near-constant inter-arrival time."""
+    """
+    Generate tasks với Poisson process — inter-arrival time exponential.
+    Rate cố định λ tasks/phút.
+    """
     if count <= 0:
         return []
 
     rng = random.Random(seed)
     start = start_time or datetime.now(timezone.utc)
-    interval_sec = 60.0 / rate_per_minute
+    mean_interval_sec = 60.0 / max(rate_per_minute, 0.1)
 
     tasks: List[Task] = []
     current = start
     for i in range(count):
-        # Small jitter to avoid perfectly deterministic spacing.
-        jitter = rng.uniform(-0.15, 0.15) * interval_sec
         if i > 0:
-            current = current + timedelta(seconds=max(0.05, interval_sec + jitter))
+            # Exponential inter-arrival → Poisson process
+            interval = rng.expovariate(1.0 / mean_interval_sec)
+            current = current + timedelta(seconds=max(0.01, interval))
         tasks.append(_make_task(i + 1, current, rng))
     return tasks
 
@@ -113,15 +116,29 @@ def generate_bursty_load(
     return tasks
 
 
+def diurnal_lambda(hour: float, base: float = 5.0, peak_extra: float = 10.0) -> float:
+    """
+    Rate λ tasks/phút theo giờ trong ngày.
+    Cao nhất quanh 12h trưa, thấp nhất ban đêm.
+
+    λ(hour) = base + peak_extra * max(0, sin(π * (hour - 6) / 12))
+      hour 6-18: nửa chu kỳ sin → workload cao ban ngày
+      hour 18-6: max(0, sin<0) = 0 → chỉ có baseline
+    """
+    return base + peak_extra * max(0.0, math.sin(math.pi * (hour - 6.0) / 12.0))
+
+
 def generate_diurnal_load(
     count: int,
-    min_rate_per_minute: float = 5.0,
-    max_rate_per_minute: float = 30.0,
-    period_hours: float = 24.0,
+    base_rate_per_minute: float = 5.0,
+    peak_extra_per_minute: float = 10.0,
     start_time: datetime | None = None,
     seed: int = 42,
 ) -> List[Task]:
-    """Generate tasks with sinusoidal arrival rate to mimic day-night traffic."""
+    """
+    Poisson process với rate λ(t) thay đổi theo giờ trong ngày.
+    Inter-arrival time = exponential(1/λ(current_hour)) — non-homogeneous Poisson.
+    """
     if count <= 0:
         return []
 
@@ -131,13 +148,12 @@ def generate_diurnal_load(
     tasks: List[Task] = []
     current = start
     for i in range(count):
-        progress = i / max(1, count - 1)
-        phase = 2.0 * math.pi * progress * (24.0 / period_hours)
-        rate = min_rate_per_minute + (max_rate_per_minute - min_rate_per_minute) * (0.5 + 0.5 * math.sin(phase))
-        interval_sec = 60.0 / max(0.1, rate)
-
         if i > 0:
-            current = current + timedelta(seconds=max(0.05, interval_sec + rng.uniform(-0.2, 0.2) * interval_sec))
+            hour = current.hour + current.minute / 60.0
+            rate = diurnal_lambda(hour, base_rate_per_minute, peak_extra_per_minute)
+            mean_interval_sec = 60.0 / max(rate, 0.1)
+            interval = rng.expovariate(1.0 / mean_interval_sec)
+            current = current + timedelta(seconds=max(0.01, interval))
         tasks.append(_make_task(i + 1, current, rng))
 
     return tasks
