@@ -94,9 +94,8 @@ class SmartDispatcher:
     ):
         self.policy_name = policy_name
         self.n_edge_nodes = n_edge_nodes
-        # Action space: edge_0..n-1, cloud (n), reject (n+1) → n+2 actions
-        self.reject_action = n_edge_nodes + 1
         self.n_actions = n_edge_nodes + 2
+        self.reject_action = n_edge_nodes + 1
         self.demo_mode = demo_mode
         self._dispatch_count = 0
         self._results: List[DispatchResult] = []
@@ -119,10 +118,7 @@ class SmartDispatcher:
         if demo_mode:
             self.state_builder.reset_simulation()
 
-        # Model loader — phải khớp với StateBuilder.obs_dim
-        # Per-node: cpu, ram, lat, queue (4 dims)
-        # Task: cpu_req, ram_req, deadline (3 dims)
-        # Temporal: hour_sin, hour_cos (2 dims)
+        # Model loader
         obs_dim = n_edge_nodes * 4 + 4 + 3 + 2
         self.model_loader = ModelLoader(
             obs_dim=obs_dim,
@@ -174,10 +170,10 @@ class SmartDispatcher:
 
         # 3. Determine node
         node_name = self.state_builder.get_node_name(action)
-        is_cloud  = (action == self.n_edge_nodes)
+        is_cloud = (action == self.n_edge_nodes)
         is_reject = (action == self.reject_action)
 
-        # 4. Estimate latency & cost (reject → không tính execution)
+        # 4. Estimate latency & cost (skip for reject — task is dropped)
         if is_reject:
             latency_est, cost_est, sla_met = 0.0, 0.0, False
         else:
@@ -185,8 +181,13 @@ class SmartDispatcher:
                 action, is_cloud, task
             )
 
-        # 5. Execute (real K8s hoặc simulation) — bỏ qua nếu reject
-        if not self.demo_mode and not is_reject:
+        # 5. Execute real backend.
+        # In demo mode, execution is skipped by default.
+        # Set FORCE_EXECUTE=true to create real K8s Jobs while still using demo metrics.
+        import os as _os
+        force_execute = _os.getenv("FORCE_EXECUTE", "false").lower() in ("1", "true", "yes")
+
+        if not is_reject and ((not self.demo_mode) or force_execute):
             self._execute_on_node(task, node_name)
 
         # 6. Update simulation state
@@ -228,6 +229,9 @@ class SmartDispatcher:
         self, action: int, is_cloud: bool, task: TaskInfo
     ) -> tuple:
         """Ước tính latency, cost, SLA cho một dispatch decision."""
+        if action >= self.n_edge_nodes + 1:
+            return 0.0, 0.0, False
+
         metrics = self.state_builder.get_current_metrics_summary()
 
         if is_cloud:
@@ -252,8 +256,164 @@ class SmartDispatcher:
 
         return float(latency), float(cost), bool(sla_met)
 
+    def _normalize_k8s_role(self, node_name: str) -> str:
+        """
+        Convert dispatcher node name to Kubernetes nodeSelector role.
+
+        Kubernetes node labels:
+        - role=edge_1
+        - role=edge_2
+        - role=cloud
+        """
+        mapping = {
+            "edge1": "edge_1",
+            "edge-1": "edge_1",
+            "edge_1": "edge_1",
+
+            "edge2": "edge_2",
+            "edge-2": "edge_2",
+            "edge_2": "edge_2",
+
+            "cloud": "cloud",
+            "cloud1": "cloud",
+            "cloud-1": "cloud",
+            "cloud_1": "cloud",
+        }
+
+        return mapping.get(str(node_name).lower(), str(node_name))
+
+    def _to_k8s_cpu(self, cpu_requirement) -> str:
+        """
+        Convert project CPU requirement to Kubernetes CPU format.
+
+        Examples:
+        - 50      -> 500m
+        - 30      -> 300m
+        - 0.5     -> 0.5 core
+        - "500m"  -> "500m"
+        """
+        value_str = str(cpu_requirement).strip()
+
+        if value_str.endswith("m"):
+            return value_str
+
+        try:
+            value = float(value_str)
+        except Exception:
+            return "500m"
+
+        # Nếu task đã dùng dạng core nhỏ: 0.5, 1, 2
+        if 0 < value <= 4:
+            return f"{value:g}"
+
+        # Nếu project dùng thang 0-100, map thành millicpu
+        millicpu = int(max(100, min(value * 10, 1000)))
+        return f"{millicpu}m"
+
+    def _to_k8s_memory(self, ram_requirement) -> str:
+        """
+        Convert project RAM requirement to Kubernetes memory format.
+
+        Examples:
+        - 128      -> 128Mi
+        - 256      -> 256Mi
+        - "512Mi"  -> "512Mi"
+        """
+        value_str = str(ram_requirement).strip()
+
+        if value_str.lower().endswith(("mi", "gi")):
+            return value_str
+
+        try:
+            value = int(float(value_str))
+        except Exception:
+            return "128Mi"
+
+        value = max(64, min(value, 1024))
+        return f"{value}Mi"
+
     def _execute_on_node(self, task: TaskInfo, node_name: str):
-        """Gửi task đến HTTP worker thật trên node được chọn."""
+        """
+        Execute task on selected node.
+
+        Default backend:
+        - k8s: create real Kubernetes Job/Pod on K3s using nodeSelector.
+
+        Fallback backend:
+        - http: old task_worker.py HTTP mode.
+        """
+        import os
+        import time
+
+        backend = os.getenv("EXECUTION_BACKEND", "k8s").lower()
+
+        # Fallback về HTTP worker cũ nếu cần debug nhanh:
+        # EXECUTION_BACKEND=http python3 ...
+        if backend == "http":
+            return self._execute_on_node_http(task, node_name)
+
+        if not self._k8s_breaker.allow_request():
+            logger.warning("Circuit breaker OPEN — task %s logged only", task.task_id)
+            return
+
+        try:
+            from dispatcher.pod_deployer import deploy_and_wait
+
+            target_role = self._normalize_k8s_role(node_name)
+            cpu_req = self._to_k8s_cpu(task.cpu_requirement)
+            ram_req = self._to_k8s_memory(task.ram_requirement)
+
+            # Giới hạn duration để demo/test không chạy quá lâu.
+            # deadline_ms càng lớn thì task chạy lâu hơn một chút.
+            try:
+                duration_seconds = max(1.0, min(float(task.deadline_ms) / 1000.0 * 0.5, 5.0))
+            except Exception:
+                duration_seconds = 2.0
+
+            start = time.perf_counter()
+
+            job_name, status, latency_ms = deploy_and_wait(
+                task_id=str(task.task_id),
+                target_role=target_role,
+                cpu_req=cpu_req,
+                ram_req=ram_req,
+                duration_seconds=duration_seconds,
+                cleanup=False,
+            )
+
+            total_ms = int((time.perf_counter() - start) * 1000)
+
+            if status == "succeeded":
+                logger.info(
+                    "Task %s → %s | backend=k8s job=%s status=%s latency_ms=%s total_ms=%s",
+                    task.task_id,
+                    target_role,
+                    job_name,
+                    status,
+                    latency_ms,
+                    total_ms,
+                )
+                self._k8s_breaker.record_success()
+            else:
+                logger.error(
+                    "Task %s → %s | backend=k8s job=%s status=%s latency_ms=%s",
+                    task.task_id,
+                    target_role,
+                    job_name,
+                    status,
+                    latency_ms,
+                )
+                self._k8s_breaker.record_failure()
+
+        except Exception as e:
+            logger.error("K8s Job execution failed task=%s node=%s: %s", task.task_id, node_name, e)
+            self._k8s_breaker.record_failure()
+
+    def _execute_on_node_http(self, task: TaskInfo, node_name: str):
+        """
+        Fallback: gửi task đến HTTP worker cũ trên node được chọn.
+        Giữ lại để debug nhanh nếu K8s backend có lỗi.
+        """
         if not self._k8s_breaker.allow_request():
             logger.warning("Circuit breaker OPEN — task %s logged only", task.task_id)
             return
@@ -273,15 +433,22 @@ class SmartDispatcher:
                 "ram_requirement": task.ram_requirement,
                 "deadline_ms":     task.deadline_ms,
             }
+
             resp = _requests.post(url, json=payload, timeout=10)
             resp.raise_for_status()
-            logger.info("Task %s → %s | worker: %s", task.task_id, node_name, resp.json().get("status"))
+
+            logger.info(
+                "Task %s → %s | backend=http worker=%s",
+                task.task_id,
+                node_name,
+                resp.json().get("status"),
+            )
+
             self._k8s_breaker.record_success()
 
         except Exception as e:
             logger.error("Worker call failed task=%s node=%s: %s", task.task_id, node_name, e)
             self._k8s_breaker.record_failure()
-
     # ------------------------------------------------------------------
     # Database logging
     # ------------------------------------------------------------------
