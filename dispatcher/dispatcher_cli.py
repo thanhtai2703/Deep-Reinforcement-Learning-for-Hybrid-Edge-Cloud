@@ -88,21 +88,32 @@ def run_single_policy(args):
     )
 
     tasks = generate_tasks(args.num_tasks, seed=args.seed)
-    logger.info("Dispatching %d tasks with policy=%s ...", len(tasks), args.policy)
+    logger.info(
+        "Dispatching %d tasks with policy=%s concurrency=%d ...",
+        len(tasks), args.policy, args.concurrency,
+    )
 
     t0 = time.perf_counter()
 
-    for i, task in enumerate(tasks):
-        result = dispatcher.dispatch(task)
-
-        # Progress log mỗi 10 tasks
-        if (i + 1) % max(1, args.num_tasks // 10) == 0 or i == len(tasks) - 1:
+    if args.concurrency > 1:
+        results = dispatcher.dispatch_concurrent(tasks, max_workers=args.concurrency)
+        for i, (task, result) in enumerate(zip(tasks, results)):
             sla_icon = "OK" if result.sla_met else "MISS"
             logger.info(
-                "[%3d/%d] %s -> %-8s | lat=%6.1fms | cost=%.4f | SLA=%s",
+                "[%3d/%d] %s -> %-8s | lat=%6.1fms | SLA=%s",
                 i + 1, len(tasks), task.task_id, result.selected_node,
-                result.latency_est_ms, result.cost_est, sla_icon,
+                result.latency_est_ms, sla_icon,
             )
+    else:
+        for i, task in enumerate(tasks):
+            result = dispatcher.dispatch(task)
+            if (i + 1) % max(1, args.num_tasks // 10) == 0 or i == len(tasks) - 1:
+                sla_icon = "OK" if result.sla_met else "MISS"
+                logger.info(
+                    "[%3d/%d] %s -> %-8s | lat=%6.1fms | cost=%.4f | SLA=%s",
+                    i + 1, len(tasks), task.task_id, result.selected_node,
+                    result.latency_est_ms, result.cost_est, sla_icon,
+                )
 
     elapsed = time.perf_counter() - t0
 
@@ -229,6 +240,12 @@ def main():
     parser.add_argument(
         "--seed", type=int, default=42,
         help="Random seed for reproducibility (default: 42)",
+    )
+    parser.add_argument(
+        "--concurrency", type=int, default=1,
+        help="Number of parallel dispatch workers. >1 enables concurrent K8s "
+             "Jobs to create real CPU/RAM load on nodes (needed for "
+             "calibration data with non-zero load).",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true",

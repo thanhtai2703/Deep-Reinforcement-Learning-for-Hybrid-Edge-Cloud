@@ -2,7 +2,7 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-COPY task_processor.py /app/task_processor.py
+COPY task-processor.py /app/task_processor.py
 
 ENV PYTHONUNBUFFERED=1
 
