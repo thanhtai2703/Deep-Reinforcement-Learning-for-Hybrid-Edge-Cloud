@@ -99,6 +99,11 @@ class SmartDispatcher:
         self.demo_mode = demo_mode
         self._dispatch_count = 0
         self._results: List[DispatchResult] = []
+        self._last_timings = None
+        self._last_target_role = None
+        self._last_cpu_req_k8s = None
+        self._last_ram_req_k8s = None
+        self._last_exec_backend = None
 
         # Load instance_map từ infra_config nếu không truyền vào
         if instance_map is None and not demo_mode:
@@ -162,6 +167,7 @@ class SmartDispatcher:
         """
         # 1. Build state vector
         state = self.state_builder.build_state(task)
+        metrics_summary = self.state_builder.get_current_metrics_summary()
 
         # 2. Model predict
         t0 = time.perf_counter()
@@ -175,11 +181,18 @@ class SmartDispatcher:
 
         # 4. Estimate latency & cost (skip for reject — task is dropped)
         if is_reject:
-            latency_est, cost_est, sla_met = 0.0, 0.0, False
+            est_latency_ms, est_cost, est_sla = 0.0, 0.0, False
         else:
-            latency_est, cost_est, sla_met = self._estimate_execution(
+            est_latency_ms, est_cost, est_sla = self._estimate_execution(
                 action, is_cloud, task
             )
+
+        # Reset per-dispatch stash (filled inside _execute_on_node).
+        self._last_timings = None
+        self._last_target_role = None
+        self._last_cpu_req_k8s = None
+        self._last_ram_req_k8s = None
+        self._last_exec_backend = None
 
         # 5. Execute real backend.
         # In demo mode, execution is skipped by default.
@@ -187,8 +200,20 @@ class SmartDispatcher:
         import os as _os
         force_execute = _os.getenv("FORCE_EXECUTE", "false").lower() in ("1", "true", "yes")
 
+        real_latency_ms = None
+        exec_status = None
         if not is_reject and ((not self.demo_mode) or force_execute):
-            self._execute_on_node(task, node_name)
+            ret = self._execute_on_node(task, node_name)
+            if isinstance(ret, tuple):
+                exec_status, real_latency_ms = ret
+
+        # latency_est_ms reported in DispatchResult: real if available, else est.
+        if real_latency_ms is not None and exec_status == "succeeded":
+            reported_latency = float(real_latency_ms)
+            reported_sla = (reported_latency <= task.deadline_ms)
+        else:
+            reported_latency = est_latency_ms
+            reported_sla = est_sla
 
         # 6. Update simulation state
         if self.demo_mode:
@@ -200,9 +225,9 @@ class SmartDispatcher:
             selected_node=node_name,
             action=action,
             policy_name=self.policy_name,
-            latency_est_ms=round(latency_est, 2),
-            cost_est=round(cost_est, 6),
-            sla_met=sla_met,
+            latency_est_ms=round(reported_latency, 2),
+            cost_est=round(est_cost, 6),
+            sla_met=reported_sla,
             inference_ms=round(inference_ms, 3),
             q_values=[round(q, 4) for q in q_values] if q_values else None,
         )
@@ -211,6 +236,17 @@ class SmartDispatcher:
 
         # 8. Log to database
         self._log_to_db(task, result, state)
+        self._log_calibration(
+            task=task,
+            action=action,
+            node_name=node_name,
+            metrics_summary=metrics_summary,
+            est_latency_ms=est_latency_ms,
+            est_cost=est_cost,
+            est_sla=est_sla,
+            exec_status=exec_status,
+            real_latency_ms=real_latency_ms,
+        )
 
         return result
 
@@ -334,27 +370,21 @@ class SmartDispatcher:
 
     def _execute_on_node(self, task: TaskInfo, node_name: str):
         """
-        Execute task on selected node.
-
-        Default backend:
-        - k8s: create real Kubernetes Job/Pod on K3s using nodeSelector.
-
-        Fallback backend:
-        - http: old task_worker.py HTTP mode.
+        Execute task on selected node. Returns (status, real_latency_ms) or
+        (None, None) if execution was skipped.
         """
         import os
         import time
 
         backend = os.getenv("EXECUTION_BACKEND", "k8s").lower()
+        self._last_exec_backend = backend
 
-        # Fallback về HTTP worker cũ nếu cần debug nhanh:
-        # EXECUTION_BACKEND=http python3 ...
         if backend == "http":
             return self._execute_on_node_http(task, node_name)
 
         if not self._k8s_breaker.allow_request():
             logger.warning("Circuit breaker OPEN — task %s logged only", task.task_id)
-            return
+            return None, None
 
         try:
             from dispatcher.pod_deployer import deploy_and_wait
@@ -362,6 +392,10 @@ class SmartDispatcher:
             target_role = self._normalize_k8s_role(node_name)
             cpu_req = self._to_k8s_cpu(task.cpu_requirement)
             ram_req = self._to_k8s_memory(task.ram_requirement)
+
+            self._last_target_role = target_role
+            self._last_cpu_req_k8s = cpu_req
+            self._last_ram_req_k8s = ram_req
 
             # Giới hạn duration để demo/test không chạy quá lâu.
             # deadline_ms càng lớn thì task chạy lâu hơn một chút.
@@ -372,51 +406,55 @@ class SmartDispatcher:
 
             start = time.perf_counter()
 
-            job_name, status, latency_ms = deploy_and_wait(
+            job_name, status, timings = deploy_and_wait(
                 task_id=str(task.task_id),
                 target_role=target_role,
                 cpu_req=cpu_req,
                 ram_req=ram_req,
                 duration_seconds=duration_seconds,
                 cleanup=False,
+                cpu_intensity=float(task.cpu_requirement),
+                ram_intensity=float(task.ram_requirement),
             )
 
             total_ms = int((time.perf_counter() - start) * 1000)
+            # Stash for downstream logging once schema is extended (step 2).
+            self._last_timings = timings
 
             if status == "succeeded":
                 logger.info(
-                    "Task %s → %s | backend=k8s job=%s status=%s latency_ms=%s total_ms=%s",
-                    task.task_id,
-                    target_role,
-                    job_name,
-                    status,
-                    latency_ms,
-                    total_ms,
+                    "Task %s → %s | backend=k8s job=%s status=%s total_ms=%s "
+                    "submit=%s startup=%s exec=%s poll=%s",
+                    task.task_id, target_role, job_name, status, total_ms,
+                    timings.submit_overhead_ms,
+                    timings.container_startup_ms,
+                    timings.exec_time_ms,
+                    timings.poll_overhead_ms,
                 )
                 self._k8s_breaker.record_success()
             else:
                 logger.error(
-                    "Task %s → %s | backend=k8s job=%s status=%s latency_ms=%s",
-                    task.task_id,
-                    target_role,
-                    job_name,
-                    status,
-                    latency_ms,
+                    "Task %s → %s | backend=k8s job=%s status=%s total_ms=%s "
+                    "submit=%s startup=%s exec=%s",
+                    task.task_id, target_role, job_name, status, total_ms,
+                    timings.submit_overhead_ms,
+                    timings.container_startup_ms,
+                    timings.exec_time_ms,
                 )
                 self._k8s_breaker.record_failure()
+
+            return status, total_ms
 
         except Exception as e:
             logger.error("K8s Job execution failed task=%s node=%s: %s", task.task_id, node_name, e)
             self._k8s_breaker.record_failure()
+            return "failed", None
 
     def _execute_on_node_http(self, task: TaskInfo, node_name: str):
-        """
-        Fallback: gửi task đến HTTP worker cũ trên node được chọn.
-        Giữ lại để debug nhanh nếu K8s backend có lỗi.
-        """
+        """Returns (status, real_latency_ms) or (None, None)."""
         if not self._k8s_breaker.allow_request():
             logger.warning("Circuit breaker OPEN — task %s logged only", task.task_id)
-            return
+            return None, None
 
         try:
             from dispatcher.infra_config import WORKER_URLS
@@ -425,7 +463,7 @@ class SmartDispatcher:
             url = WORKER_URLS.get(node_name)
             if not url:
                 logger.warning("No worker URL for node=%s", node_name)
-                return
+                return None, None
 
             payload = {
                 "task_id":         task.task_id,
@@ -434,21 +472,27 @@ class SmartDispatcher:
                 "deadline_ms":     task.deadline_ms,
             }
 
+            t0 = time.perf_counter()
             resp = _requests.post(url, json=payload, timeout=10)
             resp.raise_for_status()
+            real_latency_ms = int((time.perf_counter() - t0) * 1000)
 
             logger.info(
-                "Task %s → %s | backend=http worker=%s",
+                "Task %s → %s | backend=http worker=%s latency_ms=%d",
                 task.task_id,
                 node_name,
                 resp.json().get("status"),
+                real_latency_ms,
             )
 
             self._k8s_breaker.record_success()
+            return "succeeded", real_latency_ms
 
         except Exception as e:
             logger.error("Worker call failed task=%s node=%s: %s", task.task_id, node_name, e)
             self._k8s_breaker.record_failure()
+            return "failed", None
+
     # ------------------------------------------------------------------
     # Database logging
     # ------------------------------------------------------------------
@@ -488,6 +532,91 @@ class SmartDispatcher:
             )
         except Exception as e:
             logger.error("DB logging failed for task %s: %s", task.task_id, e)
+
+    # ------------------------------------------------------------------
+    # Calibration logging
+    # ------------------------------------------------------------------
+
+    def _log_calibration(
+        self,
+        task: TaskInfo,
+        action: int,
+        node_name: str,
+        metrics_summary: dict,
+        est_latency_ms: float,
+        est_cost: float,
+        est_sla: bool,
+        exec_status: Optional[str],
+        real_latency_ms: Optional[int],
+    ):
+        """
+        Insert one row into execution_logs for sim calibration analysis.
+
+        Captures: task spec, dispatch decision, node state at dispatch (raw),
+        sim env's prediction, and real execution outcome with timing breakdown.
+        Safe to call in demo mode (exec_* fields will be NULL).
+        """
+        import json as _json
+
+        is_reject = (action == self.reject_action)
+        is_cloud = (action == self.n_edge_nodes)
+
+        # Pick the row of metrics_summary corresponding to the selected node.
+        if is_reject:
+            sel_cpu = sel_ram = sel_lat = sel_queue = None
+        elif is_cloud:
+            sel_cpu = metrics_summary.get("cloud_cpu")
+            sel_ram = metrics_summary.get("cloud_ram")
+            sel_lat = metrics_summary.get("cloud_lat")
+            sel_queue = metrics_summary.get("cloud_queue")
+        else:
+            prefix = f"edge_{action + 1}"
+            sel_cpu = metrics_summary.get(f"{prefix}_cpu")
+            sel_ram = metrics_summary.get(f"{prefix}_ram")
+            sel_lat = metrics_summary.get(f"{prefix}_lat")
+            sel_queue = metrics_summary.get(f"{prefix}_queue")
+
+        timings = self._last_timings
+        sla_real = None
+        if real_latency_ms is not None:
+            sla_real = int(real_latency_ms <= task.deadline_ms)
+
+        row = {
+            "task_id": task.task_id,
+            "cpu_requirement": float(task.cpu_requirement),
+            "ram_requirement": float(task.ram_requirement),
+            "deadline_ms": float(task.deadline_ms),
+            "priority": task.priority,
+            "payload_type": task.payload_type,
+            "policy_name": self.policy_name,
+            "action": int(action),
+            "selected_node": node_name,
+            "target_role": self._last_target_role,
+            "cpu_req_k8s": self._last_cpu_req_k8s,
+            "ram_req_k8s": self._last_ram_req_k8s,
+            "metrics_summary_json": _json.dumps(metrics_summary),
+            "selected_cpu": sel_cpu,
+            "selected_ram": sel_ram,
+            "selected_latency": sel_lat,
+            "selected_queue": sel_queue,
+            "est_latency_ms": float(est_latency_ms),
+            "est_cost": float(est_cost),
+            "est_sla_met": int(bool(est_sla)),
+            "exec_backend": self._last_exec_backend,
+            "exec_status": exec_status,
+            "total_ms": (timings.total_ms if timings else real_latency_ms),
+            "submit_overhead_ms": timings.submit_overhead_ms if timings else None,
+            "container_startup_ms": timings.container_startup_ms if timings else None,
+            "exec_time_ms": timings.exec_time_ms if timings else None,
+            "poll_overhead_ms": timings.poll_overhead_ms if timings else None,
+            "pod_node": timings.node_name if timings else None,
+            "sla_met_real": sla_real,
+        }
+
+        try:
+            self.db.insert_execution_log(row)
+        except Exception as e:
+            logger.error("Calibration log insert failed task=%s: %s", task.task_id, e)
 
     # ------------------------------------------------------------------
     # Statistics
