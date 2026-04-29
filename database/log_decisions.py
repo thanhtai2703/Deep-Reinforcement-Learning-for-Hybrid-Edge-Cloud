@@ -208,7 +208,8 @@ class DatabaseManager:
             "selected_latency", "selected_queue", "est_latency_ms",
             "est_cost", "est_sla_met", "exec_backend", "exec_status",
             "total_ms", "submit_overhead_ms", "container_startup_ms",
-            "exec_time_ms", "poll_overhead_ms", "pod_node", "sla_met_real",
+            "exec_time_ms", "poll_overhead_ms", "pod_node",
+            "cpu_during_exec", "ram_during_exec", "sla_met_real",
         ]
         placeholders = ", ".join(["?"] * len(cols))
         col_list = ", ".join(cols)
@@ -375,6 +376,8 @@ CREATE TABLE IF NOT EXISTS execution_logs (
     exec_time_ms INTEGER,
     poll_overhead_ms INTEGER,
     pod_node TEXT,
+    cpu_during_exec REAL,
+    ram_during_exec REAL,
     sla_met_real INTEGER
 );
 

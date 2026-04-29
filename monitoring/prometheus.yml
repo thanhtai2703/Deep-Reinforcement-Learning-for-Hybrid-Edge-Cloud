@@ -25,6 +25,8 @@ scrape_configs:
 
   - job_name: "cloud"
     static_configs:
-      - targets: ["54.251.136.126:9100"]
+      # Note: from inside Docker, "localhost" = container itself.
+      # Use host.docker.internal to scrape node_exporter on the host.
+      - targets: ["host.docker.internal:9100"]
         labels:
           node: "cloud"

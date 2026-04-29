@@ -28,6 +28,14 @@ from rl_env.edge_cloud_env import EdgeCloudEnv
 from models.dqn_agent import DQNAgent, DQNConfig
 
 
+def make_env(env_kind: str, **kwargs):
+    """Factory: env_kind in {'uncalibrated', 'calibrated'}."""
+    if env_kind == "calibrated":
+        from rl_env.edge_cloud_env_calibrated import EdgeCloudEnvCalibrated
+        return EdgeCloudEnvCalibrated(**kwargs)
+    return EdgeCloudEnv(**kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Cấu hình Training
 # ---------------------------------------------------------------------------
@@ -152,13 +160,17 @@ def train():
     cfg = TRAIN_CONFIG
     setup_dirs(cfg["save_dir"], cfg["log_dir"], cfg["plot_dir"])
 
-    # Khởi tạo môi trường
-    env = EdgeCloudEnv(
+    env_kind = cfg.get("env_kind", "uncalibrated")
+    print(f"  Env: {env_kind}")
+
+    env = make_env(
+        env_kind,
         n_edge_nodes  = cfg["n_edge_nodes"],
         use_prometheus= False,     # Simulation mode
         max_steps     = cfg["max_steps"],
     )
-    eval_env = EdgeCloudEnv(
+    eval_env = make_env(
+        env_kind,
         n_edge_nodes  = cfg["n_edge_nodes"],
         use_prometheus= False,
         max_steps     = cfg["max_steps"],
@@ -251,7 +263,7 @@ def train():
                 agent.save(os.path.join(cfg["save_dir"], "dqn_best.pth"))
 
         # Lưu checkpoint định kỳ
-        if episode % 200 == 0:
+        if episode % 500 == 0:
             agent.save(os.path.join(cfg["save_dir"], f"dqn_ep{episode}.pth"))
 
     # Lưu model cuối
@@ -269,4 +281,28 @@ def train():
 
 
 if __name__ == "__main__":
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--env", choices=("uncalibrated", "calibrated"),
+                   default="uncalibrated")
+    p.add_argument("--save-dir", default=None,
+                   help="Override save dir (default: models/checkpoints/<env>)")
+    p.add_argument("--log-dir", default=None,
+                   help="Override log dir")
+    p.add_argument("--episodes", type=int, default=None,
+                   help="Override n_episodes")
+    args = p.parse_args()
+
+    TRAIN_CONFIG["env_kind"] = args.env
+    if args.save_dir:
+        TRAIN_CONFIG["save_dir"] = args.save_dir
+    else:
+        TRAIN_CONFIG["save_dir"] = f"models/checkpoints/dqn_{args.env}"
+    if args.log_dir:
+        TRAIN_CONFIG["log_dir"] = args.log_dir
+    else:
+        TRAIN_CONFIG["log_dir"] = f"experiments/logs/dqn_{args.env}"
+    if args.episodes:
+        TRAIN_CONFIG["n_episodes"] = args.episodes
+
     train()

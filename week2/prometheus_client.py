@@ -78,7 +78,9 @@ class PrometheusClient:
         return output
 
     def get_cpu_usage_pct(self) -> Dict[str, float]:
-        query = '100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])))'
+        # Rate window 30s (was 5m): reflects current load instead of 5-min average.
+        # Needs scrape_interval ≤ 10s to have enough samples (currently 5s → 6 samples).
+        query = '100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[30s])))'
         return self.vector_to_map(self.instant_query(query))
 
     def get_ram_usage_pct(self) -> Dict[str, float]:

@@ -97,13 +97,10 @@ class SmartDispatcher:
         self.n_actions = n_edge_nodes + 2
         self.reject_action = n_edge_nodes + 1
         self.demo_mode = demo_mode
+        import threading
         self._dispatch_count = 0
         self._results: List[DispatchResult] = []
-        self._last_timings = None
-        self._last_target_role = None
-        self._last_cpu_req_k8s = None
-        self._last_ram_req_k8s = None
-        self._last_exec_backend = None
+        self._results_lock = threading.Lock()
 
         # Load instance_map từ infra_config nếu không truyền vào
         if instance_map is None and not demo_mode:
@@ -187,25 +184,22 @@ class SmartDispatcher:
                 action, is_cloud, task
             )
 
-        # Reset per-dispatch stash (filled inside _execute_on_node).
-        self._last_timings = None
-        self._last_target_role = None
-        self._last_cpu_req_k8s = None
-        self._last_ram_req_k8s = None
-        self._last_exec_backend = None
-
         # 5. Execute real backend.
         # In demo mode, execution is skipped by default.
         # Set FORCE_EXECUTE=true to create real K8s Jobs while still using demo metrics.
         import os as _os
         force_execute = _os.getenv("FORCE_EXECUTE", "false").lower() in ("1", "true", "yes")
 
-        real_latency_ms = None
-        exec_status = None
+        exec_info = {
+            "status": None, "total_ms": None, "timings": None,
+            "target_role": None, "cpu_req_k8s": None, "ram_req_k8s": None,
+            "exec_backend": None,
+        }
         if not is_reject and ((not self.demo_mode) or force_execute):
-            ret = self._execute_on_node(task, node_name)
-            if isinstance(ret, tuple):
-                exec_status, real_latency_ms = ret
+            exec_info = self._execute_on_node(task, node_name)
+
+        real_latency_ms = exec_info["total_ms"]
+        exec_status = exec_info["status"]
 
         # latency_est_ms reported in DispatchResult: real if available, else est.
         if real_latency_ms is not None and exec_status == "succeeded":
@@ -231,8 +225,9 @@ class SmartDispatcher:
             inference_ms=round(inference_ms, 3),
             q_values=[round(q, 4) for q in q_values] if q_values else None,
         )
-        self._results.append(result)
-        self._dispatch_count += 1
+        with self._results_lock:
+            self._results.append(result)
+            self._dispatch_count += 1
 
         # 8. Log to database
         self._log_to_db(task, result, state)
@@ -244,8 +239,7 @@ class SmartDispatcher:
             est_latency_ms=est_latency_ms,
             est_cost=est_cost,
             est_sla=est_sla,
-            exec_status=exec_status,
-            real_latency_ms=real_latency_ms,
+            exec_info=exec_info,
         )
 
         return result
@@ -255,6 +249,25 @@ class SmartDispatcher:
         results = []
         for task in tasks:
             results.append(self.dispatch(task))
+        return results
+
+    def dispatch_concurrent(
+        self,
+        tasks: List[TaskInfo],
+        max_workers: int = 10,
+    ) -> List[DispatchResult]:
+        """
+        Dispatch tasks concurrently via ThreadPoolExecutor.
+
+        Multiple K8s Jobs run in parallel → real CPU/RAM contention on nodes.
+        Required for collecting calibration data with non-zero load.
+
+        Order of returned results matches order of input tasks.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            results = list(pool.map(self.dispatch, tasks))
         return results
 
     # ------------------------------------------------------------------
@@ -370,21 +383,30 @@ class SmartDispatcher:
 
     def _execute_on_node(self, task: TaskInfo, node_name: str):
         """
-        Execute task on selected node. Returns (status, real_latency_ms) or
-        (None, None) if execution was skipped.
+        Execute task on selected node.
+
+        Returns dict (thread-safe — no instance state mutation):
+          {status, total_ms, timings, target_role, cpu_req_k8s, ram_req_k8s,
+           exec_backend}
+        Fields may be None if execution was skipped or failed early.
         """
         import os
         import time
 
         backend = os.getenv("EXECUTION_BACKEND", "k8s").lower()
-        self._last_exec_backend = backend
 
         if backend == "http":
             return self._execute_on_node_http(task, node_name)
 
+        result = {
+            "status": None, "total_ms": None, "timings": None,
+            "target_role": None, "cpu_req_k8s": None, "ram_req_k8s": None,
+            "exec_backend": backend,
+        }
+
         if not self._k8s_breaker.allow_request():
             logger.warning("Circuit breaker OPEN — task %s logged only", task.task_id)
-            return None, None
+            return result
 
         try:
             from dispatcher.pod_deployer import deploy_and_wait
@@ -393,15 +415,16 @@ class SmartDispatcher:
             cpu_req = self._to_k8s_cpu(task.cpu_requirement)
             ram_req = self._to_k8s_memory(task.ram_requirement)
 
-            self._last_target_role = target_role
-            self._last_cpu_req_k8s = cpu_req
-            self._last_ram_req_k8s = ram_req
+            result["target_role"] = target_role
+            result["cpu_req_k8s"] = cpu_req
+            result["ram_req_k8s"] = ram_req
 
-            # Giới hạn duration để demo/test không chạy quá lâu.
-            # deadline_ms càng lớn thì task chạy lâu hơn một chút.
+            # Duration: 0.5 × deadline, clamp [1, 15]s.
+            # Cap cao hơn (15s vs 5s cũ) → pods overlap nhiều khi concurrent
+            # → CPU contention thật → calibration data có range load rộng.
             try:
-                duration_seconds = max(1.0, min(float(task.deadline_ms) / 1000.0 * 0.5, 5.0))
-            except Exception:
+                duration_seconds = max(1.0, min(float(task.deadline_ms) / 1000.0 * 0.5, 15.0))
+            except   Exception:
                 duration_seconds = 2.0
 
             start = time.perf_counter()
@@ -418,8 +441,9 @@ class SmartDispatcher:
             )
 
             total_ms = int((time.perf_counter() - start) * 1000)
-            # Stash for downstream logging once schema is extended (step 2).
-            self._last_timings = timings
+            result["status"] = status
+            result["total_ms"] = total_ms
+            result["timings"] = timings
 
             if status == "succeeded":
                 logger.info(
@@ -443,18 +467,25 @@ class SmartDispatcher:
                 )
                 self._k8s_breaker.record_failure()
 
-            return status, total_ms
+            return result
 
         except Exception as e:
             logger.error("K8s Job execution failed task=%s node=%s: %s", task.task_id, node_name, e)
             self._k8s_breaker.record_failure()
-            return "failed", None
+            result["status"] = "failed"
+            return result
 
     def _execute_on_node_http(self, task: TaskInfo, node_name: str):
-        """Returns (status, real_latency_ms) or (None, None)."""
+        """Returns dict (same shape as _execute_on_node)."""
+        result = {
+            "status": None, "total_ms": None, "timings": None,
+            "target_role": node_name, "cpu_req_k8s": None, "ram_req_k8s": None,
+            "exec_backend": "http",
+        }
+
         if not self._k8s_breaker.allow_request():
             logger.warning("Circuit breaker OPEN — task %s logged only", task.task_id)
-            return None, None
+            return result
 
         try:
             from dispatcher.infra_config import WORKER_URLS
@@ -463,7 +494,7 @@ class SmartDispatcher:
             url = WORKER_URLS.get(node_name)
             if not url:
                 logger.warning("No worker URL for node=%s", node_name)
-                return None, None
+                return result
 
             payload = {
                 "task_id":         task.task_id,
@@ -479,19 +510,20 @@ class SmartDispatcher:
 
             logger.info(
                 "Task %s → %s | backend=http worker=%s latency_ms=%d",
-                task.task_id,
-                node_name,
-                resp.json().get("status"),
-                real_latency_ms,
+                task.task_id, node_name,
+                resp.json().get("status"), real_latency_ms,
             )
 
             self._k8s_breaker.record_success()
-            return "succeeded", real_latency_ms
+            result["status"] = "succeeded"
+            result["total_ms"] = real_latency_ms
+            return result
 
         except Exception as e:
             logger.error("Worker call failed task=%s node=%s: %s", task.task_id, node_name, e)
             self._k8s_breaker.record_failure()
-            return "failed", None
+            result["status"] = "failed"
+            return result
 
     # ------------------------------------------------------------------
     # Database logging
@@ -546,8 +578,7 @@ class SmartDispatcher:
         est_latency_ms: float,
         est_cost: float,
         est_sla: bool,
-        exec_status: Optional[str],
-        real_latency_ms: Optional[int],
+        exec_info: dict,
     ):
         """
         Insert one row into execution_logs for sim calibration analysis.
@@ -576,10 +607,41 @@ class SmartDispatcher:
             sel_lat = metrics_summary.get(f"{prefix}_lat")
             sel_queue = metrics_summary.get(f"{prefix}_queue")
 
-        timings = self._last_timings
+        timings = exec_info.get("timings")
+        real_latency_ms = exec_info.get("total_ms")
+        exec_status = exec_info.get("status")
         sla_real = None
         if real_latency_ms is not None:
             sla_real = int(real_latency_ms <= task.deadline_ms)
+
+        # Ground-truth load: avg CPU/RAM during pod lifetime.
+        # selected_cpu (snapshot at dispatch) underestimates true load because
+        # it's measured BEFORE the pod and its concurrent siblings start
+        # burning CPU. cpu_during_exec captures load WHILE the pod was running.
+        cpu_during = ram_during = None
+        if (timings and timings.container_finished_at
+                and timings.exec_time_ms
+                and exec_info.get("target_role")):
+            try:
+                from datetime import datetime as _dt
+                t_end = _dt.fromisoformat(
+                    timings.container_finished_at.replace("Z", "+00:00")
+                ).timestamp()
+                if timings.pod_scheduled_at:
+                    t_start = _dt.fromisoformat(
+                        timings.pod_scheduled_at.replace("Z", "+00:00")
+                    ).timestamp()
+                    duration_s = max(t_end - t_start, 5.0)
+                else:
+                    duration_s = max(timings.exec_time_ms / 1000.0, 5.0)
+                cpu_during, ram_during = self.state_builder.query_load_in_window(
+                    role=exec_info["target_role"],
+                    t_end_unix=t_end,
+                    duration_s=duration_s,
+                )
+            except Exception as e:
+                logger.warning("query_load_in_window failed task=%s: %s",
+                               task.task_id, e)
 
         row = {
             "task_id": task.task_id,
@@ -591,9 +653,9 @@ class SmartDispatcher:
             "policy_name": self.policy_name,
             "action": int(action),
             "selected_node": node_name,
-            "target_role": self._last_target_role,
-            "cpu_req_k8s": self._last_cpu_req_k8s,
-            "ram_req_k8s": self._last_ram_req_k8s,
+            "target_role": exec_info.get("target_role"),
+            "cpu_req_k8s": exec_info.get("cpu_req_k8s"),
+            "ram_req_k8s": exec_info.get("ram_req_k8s"),
             "metrics_summary_json": _json.dumps(metrics_summary),
             "selected_cpu": sel_cpu,
             "selected_ram": sel_ram,
@@ -602,7 +664,7 @@ class SmartDispatcher:
             "est_latency_ms": float(est_latency_ms),
             "est_cost": float(est_cost),
             "est_sla_met": int(bool(est_sla)),
-            "exec_backend": self._last_exec_backend,
+            "exec_backend": exec_info.get("exec_backend"),
             "exec_status": exec_status,
             "total_ms": (timings.total_ms if timings else real_latency_ms),
             "submit_overhead_ms": timings.submit_overhead_ms if timings else None,
@@ -610,6 +672,8 @@ class SmartDispatcher:
             "exec_time_ms": timings.exec_time_ms if timings else None,
             "poll_overhead_ms": timings.poll_overhead_ms if timings else None,
             "pod_node": timings.node_name if timings else None,
+            "cpu_during_exec": cpu_during,
+            "ram_during_exec": ram_during,
             "sla_met_real": sla_real,
         }
 

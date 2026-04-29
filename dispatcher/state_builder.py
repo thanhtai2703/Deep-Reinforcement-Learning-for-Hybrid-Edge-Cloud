@@ -252,6 +252,64 @@ class StateBuilder:
             return "cloud"
         return "rejected"
 
+    def query_load_in_window(
+        self,
+        role: str,
+        t_end_unix: float,
+        duration_s: float,
+    ) -> tuple:
+        """
+        Query Prometheus for AVG CPU% / RAM% on the node `role` over the
+        time window [t_end_unix - duration_s, t_end_unix].
+
+        Used for sim calibration: ground-truth load while a pod was actually
+        executing. Different from build_state's snapshot, which captures
+        load AT dispatch time (before pod started burning CPU).
+
+        Returns (cpu_pct, ram_pct), each may be None if query fails.
+        """
+        if not self.use_prometheus or self._prom_client is None:
+            return None, None
+
+        # Reverse instance_map: role -> instance
+        role_to_inst = {v: k for k, v in (
+            getattr(self, "_instance_map", {}) or {}
+        ).items()}
+        instance = role_to_inst.get(role)
+        if not instance:
+            return None, None
+
+        # Min 5s for rate to have ≥2 samples at scrape_interval=5s.
+        win_s = max(int(duration_s), 5)
+        t_str = str(int(t_end_unix))
+
+        cpu_query = (
+            f'100 * (1 - avg by(instance)('
+            f'rate(node_cpu_seconds_total{{mode="idle",instance="{instance}"}}[{win_s}s])'
+            f'))'
+        )
+        ram_query = (
+            f'100 * (1 - '
+            f'node_memory_MemAvailable_bytes{{instance="{instance}"}} / '
+            f'node_memory_MemTotal_bytes{{instance="{instance}"}}'
+            f')'
+        )
+
+        from week2.prometheus_client import PrometheusClient as _PC
+        cpu = ram = None
+        try:
+            resp = self._prom_client.instant_query(cpu_query, time=t_str)
+            cpu = _PC.vector_to_map(resp).get(instance)
+        except Exception as e:
+            logger.warning("query_load_in_window cpu failed role=%s: %s", role, e)
+        try:
+            resp = self._prom_client.instant_query(ram_query, time=t_str)
+            ram = _PC.vector_to_map(resp).get(instance)
+        except Exception as e:
+            logger.warning("query_load_in_window ram failed role=%s: %s", role, e)
+
+        return cpu, ram
+
     def get_current_metrics_summary(self) -> dict:
         """Trả về summary metrics hiện tại (dùng cho logging/debug)."""
         summary = {}

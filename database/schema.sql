@@ -82,6 +82,12 @@ CREATE TABLE IF NOT EXISTS execution_logs (
     poll_overhead_ms INTEGER,
     pod_node TEXT,                       -- actual K8s node name
 
+    -- Ground-truth load during pod lifetime (avg over [scheduled, finished])
+    -- Different from selected_cpu/selected_ram which is snapshot AT dispatch.
+    -- Use this for fitting latency = f(load), not selected_cpu.
+    cpu_during_exec REAL,
+    ram_during_exec REAL,
+
     sla_met_real INTEGER                 -- recomputed from total_ms vs deadline
 );
 
