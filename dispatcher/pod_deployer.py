@@ -1,13 +1,43 @@
 import argparse
 import re
 import time
+from dataclasses import asdict, dataclass
 from typing import Optional, Tuple
 
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
 
-IMAGE_NAME = "ovapil/task-processor:v1"
+@dataclass
+class TimingBreakdown:
+    """
+    Per-task timing components captured from K8s for sim calibration.
+
+    K8s timestamps have 1s resolution. Use only for distribution-level fitting,
+    not per-sample millisecond accuracy.
+
+    Fields (ms, None if not available):
+    - submit_overhead_ms : job_created -> pod_scheduled (API + scheduler)
+    - container_startup_ms : pod_scheduled -> container_started (image pull + init)
+    - exec_time_ms       : container_started -> container_finished (compute)
+    - total_ms           : dispatcher-side wall clock, submit -> wait_complete
+    """
+    total_ms: int = 0
+    submit_overhead_ms: Optional[int] = None
+    container_startup_ms: Optional[int] = None
+    exec_time_ms: Optional[int] = None
+    poll_overhead_ms: Optional[int] = None
+    node_name: Optional[str] = None
+    job_created_at: Optional[str] = None
+    pod_scheduled_at: Optional[str] = None
+    container_started_at: Optional[str] = None
+    container_finished_at: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+IMAGE_NAME = "ovapil/task-processor:v2"
 NAMESPACE = "default"
 KUBECONFIG_PATH = "/home/ubuntu/.kube/config"
 
@@ -42,6 +72,8 @@ def deploy_task_pod(
     duration_seconds: float = 2.0,
     namespace: str = NAMESPACE,
     image: str = IMAGE_NAME,
+    cpu_intensity: float = 30.0,
+    ram_intensity: float = 30.0,
 ) -> str:
     """
     Deploy one task as a real Kubernetes Job.
@@ -73,6 +105,8 @@ def deploy_task_pod(
             client.V1EnvVar(name="CPU_REQUIREMENT", value=cpu_req),
             client.V1EnvVar(name="RAM_REQUIREMENT", value=ram_req),
             client.V1EnvVar(name="TASK_DURATION_SECONDS", value=str(duration_seconds)),
+            client.V1EnvVar(name="CPU_INTENSITY", value=str(cpu_intensity)),
+            client.V1EnvVar(name="RAM_INTENSITY", value=str(ram_intensity)),
         ],
         resources=client.V1ResourceRequirements(
             requests={
@@ -150,31 +184,103 @@ def get_job_pod_node(job_name: str, namespace: str = NAMESPACE) -> Optional[str]
     return pods.items[0].spec.node_name
 
 
+def _ms_between(t_start, t_end) -> Optional[int]:
+    """Return (t_end - t_start) in ms, or None if either is missing."""
+    if t_start is None or t_end is None:
+        return None
+    return int((t_end - t_start).total_seconds() * 1000)
+
+
+def fetch_k8s_timings(
+    job_name: str,
+    namespace: str = NAMESPACE,
+) -> TimingBreakdown:
+    """
+    Fetch all K8s server-side timestamps for a finished Job and compute
+    component-level timing breakdown. K8s timestamps have 1-second resolution,
+    so per-sample error can be ±1s. Suitable for distribution fitting, not
+    for high-precision benchmarking.
+    """
+    load_k8s_config()
+    batch_api = client.BatchV1Api()
+    core_api = client.CoreV1Api()
+
+    breakdown = TimingBreakdown()
+
+    try:
+        job = batch_api.read_namespaced_job(name=job_name, namespace=namespace)
+        job_created = job.metadata.creation_timestamp
+        breakdown.job_created_at = job_created.isoformat() if job_created else None
+    except ApiException:
+        job_created = None
+
+    try:
+        pods = core_api.list_namespaced_pod(
+            namespace=namespace,
+            label_selector=f"job-name={job_name}",
+        )
+    except ApiException:
+        return breakdown
+
+    if not pods.items:
+        return breakdown
+
+    pod = pods.items[0]
+    breakdown.node_name = pod.spec.node_name
+
+    pod_scheduled = pod.status.start_time
+    breakdown.pod_scheduled_at = pod_scheduled.isoformat() if pod_scheduled else None
+
+    container_started = None
+    container_finished = None
+    if pod.status.container_statuses:
+        cs = pod.status.container_statuses[0]
+        if cs.state and cs.state.terminated:
+            container_started = cs.state.terminated.started_at
+            container_finished = cs.state.terminated.finished_at
+        elif cs.state and cs.state.running:
+            container_started = cs.state.running.started_at
+
+    breakdown.container_started_at = (
+        container_started.isoformat() if container_started else None
+    )
+    breakdown.container_finished_at = (
+        container_finished.isoformat() if container_finished else None
+    )
+
+    breakdown.submit_overhead_ms = _ms_between(job_created, pod_scheduled)
+    breakdown.container_startup_ms = _ms_between(pod_scheduled, container_started)
+    breakdown.exec_time_ms = _ms_between(container_started, container_finished)
+
+    return breakdown
+
+
 def wait_for_completion(
     job_name: str,
     namespace: str = NAMESPACE,
     timeout_seconds: int = 180,
     poll_interval: float = 1.0,
-) -> Tuple[str, int]:
+) -> Tuple[str, TimingBreakdown]:
     """
-    Wait until the Kubernetes Job completes or fails.
+    Wait until the Kubernetes Job completes or fails, then fetch K8s timing
+    breakdown.
 
     Returns:
     - status: "succeeded", "failed", or "timeout"
-    - duration_ms: latency from submit/wait start to final status
+    - timings: TimingBreakdown with component-level latencies
     """
     load_k8s_config()
     batch_api = client.BatchV1Api()
 
     start = time.perf_counter()
+    final_status = None
 
     while True:
         elapsed_seconds = time.perf_counter() - start
 
         if elapsed_seconds > timeout_seconds:
-            duration_ms = int(elapsed_seconds * 1000)
-            print(f"[pod_deployer] Job timeout: {job_name}, duration_ms={duration_ms}")
-            return "timeout", duration_ms
+            final_status = "timeout"
+            break
 
         job = batch_api.read_namespaced_job_status(
             name=job_name,
@@ -184,24 +290,33 @@ def wait_for_completion(
         status = job.status
 
         if status.succeeded and status.succeeded >= 1:
-            duration_ms = int((time.perf_counter() - start) * 1000)
-            node_name = get_job_pod_node(job_name, namespace)
-            print(
-                f"[pod_deployer] Job succeeded: {job_name}, "
-                f"node={node_name}, duration_ms={duration_ms}"
-            )
-            return "succeeded", duration_ms
+            final_status = "succeeded"
+            break
 
         if status.failed and status.failed >= 1:
-            duration_ms = int((time.perf_counter() - start) * 1000)
-            node_name = get_job_pod_node(job_name, namespace)
-            print(
-                f"[pod_deployer] Job failed: {job_name}, "
-                f"node={node_name}, duration_ms={duration_ms}"
-            )
-            return "failed", duration_ms
+            final_status = "failed"
+            break
 
         time.sleep(poll_interval)
+
+    duration_ms = int((time.perf_counter() - start) * 1000)
+    timings = fetch_k8s_timings(job_name, namespace)
+    timings.total_ms = duration_ms
+
+    if timings.exec_time_ms is not None and timings.container_startup_ms is not None and timings.submit_overhead_ms is not None:
+        accounted = timings.submit_overhead_ms + timings.container_startup_ms + timings.exec_time_ms
+        timings.poll_overhead_ms = max(0, duration_ms - accounted)
+
+    print(
+        f"[pod_deployer] Job {final_status}: {job_name}, "
+        f"node={timings.node_name}, total_ms={duration_ms}, "
+        f"submit={timings.submit_overhead_ms}, "
+        f"startup={timings.container_startup_ms}, "
+        f"exec={timings.exec_time_ms}, "
+        f"poll={timings.poll_overhead_ms}"
+    )
+
+    return final_status, timings
 
 
 def delete_job(job_name: str, namespace: str = NAMESPACE) -> None:
@@ -233,14 +348,19 @@ def deploy_and_wait(
     ram_req: str,
     duration_seconds: float = 2.0,
     cleanup: bool = False,
-) -> Tuple[str, str, int]:
+    cpu_intensity: float = 30.0,
+    ram_intensity: float = 30.0,
+) -> Tuple[str, str, TimingBreakdown]:
     """
     Helper for dispatcher integration.
 
     Returns:
     - job_name
-    - status
-    - duration_ms
+    - status: "succeeded", "failed", or "timeout"
+    - timings: TimingBreakdown with submit_overhead, container_startup,
+               exec_time, poll_overhead, total_ms, plus raw timestamps.
+               Use .total_ms for the dispatcher-side wall-clock latency
+               (overrides the previous int return).
     """
     submit_start = time.perf_counter()
 
@@ -250,21 +370,27 @@ def deploy_and_wait(
         cpu_req=cpu_req,
         ram_req=ram_req,
         duration_seconds=duration_seconds,
+        cpu_intensity=cpu_intensity,
+        ram_intensity=ram_intensity,
     )
 
-    status, wait_duration_ms = wait_for_completion(job_name)
+    status, timings = wait_for_completion(job_name)
 
     total_duration_ms = int((time.perf_counter() - submit_start) * 1000)
+    timings.total_ms = total_duration_ms
 
     print(
         f"[pod_deployer] deploy_and_wait result: "
-        f"job={job_name}, status={status}, total_duration_ms={total_duration_ms}"
+        f"job={job_name}, status={status}, total_ms={total_duration_ms}, "
+        f"breakdown=submit:{timings.submit_overhead_ms} "
+        f"startup:{timings.container_startup_ms} "
+        f"exec:{timings.exec_time_ms} poll:{timings.poll_overhead_ms}"
     )
 
     if cleanup:
         delete_job(job_name)
 
-    return job_name, status, total_duration_ms
+    return job_name, status, timings
 
 
 if __name__ == "__main__":

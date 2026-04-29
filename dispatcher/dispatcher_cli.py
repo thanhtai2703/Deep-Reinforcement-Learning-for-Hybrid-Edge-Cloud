@@ -46,6 +46,21 @@ logging.basicConfig(
 logger = logging.getLogger("CLI")
 
 
+def _sample_deadline_ms(rng) -> float:
+    """
+    Mixture distribution mô phỏng workload thật:
+      30% short  (2-5s)   — task gấp, dễ miss SLA → signal cho reject
+      50% medium (5-15s)  — task vừa, biên cold-start → signal cho load awareness
+      20% long   (15-30s) — task lỏng, gần như met → signal cho cost optimization
+    """
+    tier = rng.choice(["short", "medium", "long"], p=[0.3, 0.5, 0.2])
+    if tier == "short":
+        return float(rng.uniform(2000, 5000))
+    if tier == "medium":
+        return float(rng.uniform(5000, 15000))
+    return float(rng.uniform(15000, 30000))
+
+
 def generate_tasks(count: int, seed: int = 42) -> list:
     """Sinh danh sách tasks ngẫu nhiên để test."""
     rng = np.random.default_rng(seed)
@@ -55,7 +70,7 @@ def generate_tasks(count: int, seed: int = 42) -> list:
             task_id=f"task_{i + 1:06d}",
             cpu_requirement=float(rng.uniform(5, 60)),
             ram_requirement=float(rng.uniform(5, 50)),
-            deadline_ms=float(rng.uniform(50, 500)),
+            deadline_ms=_sample_deadline_ms(rng),
             priority=rng.choice(["low", "medium", "high"]),
             payload_type=rng.choice(["compute", "image", "io"]),
         ))

@@ -184,6 +184,43 @@ class DatabaseManager:
             )
 
     # ------------------------------------------------------------------
+    # Execution log (sim calibration)
+    # ------------------------------------------------------------------
+
+    def insert_execution_log(self, row: dict) -> None:
+        """
+        Insert one denormalized execution log row for sim calibration.
+
+        Expected keys (all optional except task_id):
+          task_id, cpu_requirement, ram_requirement, deadline_ms, priority,
+          payload_type, policy_name, action, selected_node, target_role,
+          cpu_req_k8s, ram_req_k8s, metrics_summary_json, selected_cpu,
+          selected_ram, selected_latency, selected_queue, est_latency_ms,
+          est_cost, est_sla_met, exec_backend, exec_status, total_ms,
+          submit_overhead_ms, container_startup_ms, exec_time_ms,
+          poll_overhead_ms, pod_node, sla_met_real
+        """
+        cols = [
+            "task_id", "cpu_requirement", "ram_requirement", "deadline_ms",
+            "priority", "payload_type", "policy_name", "action",
+            "selected_node", "target_role", "cpu_req_k8s", "ram_req_k8s",
+            "metrics_summary_json", "selected_cpu", "selected_ram",
+            "selected_latency", "selected_queue", "est_latency_ms",
+            "est_cost", "est_sla_met", "exec_backend", "exec_status",
+            "total_ms", "submit_overhead_ms", "container_startup_ms",
+            "exec_time_ms", "poll_overhead_ms", "pod_node", "sla_met_real",
+        ]
+        placeholders = ", ".join(["?"] * len(cols))
+        col_list = ", ".join(cols)
+        values = [row.get(c) for c in cols]
+
+        with self._connect() as conn:
+            conn.execute(
+                f"INSERT INTO execution_logs ({col_list}) VALUES ({placeholders})",
+                values,
+            )
+
+    # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
 
@@ -306,6 +343,45 @@ CREATE TABLE IF NOT EXISTS decisions (
     notes TEXT,
     FOREIGN KEY (task_id) REFERENCES tasks (id)
 );
+
+CREATE TABLE IF NOT EXISTS execution_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    logged_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    cpu_requirement REAL,
+    ram_requirement REAL,
+    deadline_ms REAL,
+    priority TEXT,
+    payload_type TEXT,
+    policy_name TEXT,
+    action INTEGER,
+    selected_node TEXT,
+    target_role TEXT,
+    cpu_req_k8s TEXT,
+    ram_req_k8s TEXT,
+    metrics_summary_json TEXT,
+    selected_cpu REAL,
+    selected_ram REAL,
+    selected_latency REAL,
+    selected_queue REAL,
+    est_latency_ms REAL,
+    est_cost REAL,
+    est_sla_met INTEGER,
+    exec_backend TEXT,
+    exec_status TEXT,
+    total_ms INTEGER,
+    submit_overhead_ms INTEGER,
+    container_startup_ms INTEGER,
+    exec_time_ms INTEGER,
+    poll_overhead_ms INTEGER,
+    pod_node TEXT,
+    sla_met_real INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_exec_logs_task ON execution_logs (task_id);
+CREATE INDEX IF NOT EXISTS idx_exec_logs_policy ON execution_logs (policy_name);
+CREATE INDEX IF NOT EXISTS idx_exec_logs_target ON execution_logs (target_role);
+CREATE INDEX IF NOT EXISTS idx_exec_logs_status ON execution_logs (exec_status);
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status);
 CREATE INDEX IF NOT EXISTS idx_tasks_arrival_time ON tasks (arrival_time);
