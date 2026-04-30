@@ -40,11 +40,11 @@ def make_env(env_kind: str, **kwargs):
 # Cấu hình Training
 # ---------------------------------------------------------------------------
 TRAIN_CONFIG = {
-    "n_episodes":    1000,     # Tổng số episode training
+    "n_episodes":    2000,     # Tổng số episode training
     "n_edge_nodes":  2,
     "max_steps":     200,
     "eval_interval": 50,       # Đánh giá mỗi N episode
-    "eval_episodes": 20,       # Số episode dùng để đánh giá
+    "eval_episodes": 100,       # Số episode dùng để đánh giá
     "save_dir":      "models/checkpoints",
     "log_dir":       "experiments/logs",
     "plot_dir":      "experiments/plots",
