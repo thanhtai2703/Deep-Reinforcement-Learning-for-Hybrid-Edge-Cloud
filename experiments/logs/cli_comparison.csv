@@ -1,9 +1,0 @@
-policy,total,sla_rate,avg_latency_ms,p95_latency_ms,avg_cost,cloud_usage_pct,edge_usage_pct,policy
-ppo,300,95.7,78.6,213.3,1.31012,39.7,60.3,ppo
-dqn,300,94.7,66.3,147.1,1.42969,34.0,66.0,dqn
-cloud_only,300,45.0,302.7,614.9,3.01948,100.0,0.0,cloud_only
-edge_only,300,87.7,101.0,249.4,0.6039,0.0,100.0,edge_only
-least_connection,300,96.7,57.1,111.7,1.64338,41.7,58.3,least_connection
-random,300,92.7,74.7,219.4,1.42188,32.7,67.3,random
-round_robin,300,97.0,58.6,105.9,1.42382,33.3,66.7,round_robin
-threshold,300,83.0,125.1,297.9,0.60774,0.3,99.7,threshold
