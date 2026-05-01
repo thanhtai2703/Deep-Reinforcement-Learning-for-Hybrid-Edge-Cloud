@@ -11,12 +11,5 @@ PROMETHEUS_URL = "http://localhost:9090"
 INSTANCE_MAP = {
     "100.82.147.9:9100":  "edge_1",
     "100.69.169.33:9100": "edge_2",
-    "54.251.136.126:9100": "cloud",
-}
-
-# HTTP worker endpoint trên mỗi node (task_worker.py)
-WORKER_URLS = {
-    "edge_1": "http://100.82.147.9:8765/task",
-    "edge_2": "http://100.69.169.33:8765/task",
-    "cloud":  "http://54.251.136.126:8765/task",
+    "host.docker.internal:9100": "cloud",
 }

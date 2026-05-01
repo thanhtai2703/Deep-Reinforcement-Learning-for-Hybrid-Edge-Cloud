@@ -11,9 +11,9 @@ Decomposed formula:
                     * (cpu_requirement / 30) * 1000
 """
 
-EXEC_CALIBRATION = {'cloud': {'alpha': 1.0407211462802275, 'beta': -0.004567452589129551, 'r2': 0.00040658168648655124, 'rmse_ms': 475.7564515808978, 'n': 80}, 'edge_1': {'alpha': 0.9996430959361877, 'beta': 0.028307213642111938, 'r2': 0.012583768789789507, 'rmse_ms': 483.4098022292106, 'n': 78}, 'edge_2': {'alpha': 1.0112201608611744, 'beta': 0.03344657331821118, 'r2': 0.017536920278206303, 'rmse_ms': 467.82531250007395, 'n': 97}}
+EXEC_CALIBRATION = {'cloud': {'alpha': 0.3441643394484672, 'beta': 1.212042539126605, 'r2': 0.6884230951027233, 'rmse_ms': 966.6325269763022, 'n': 55}, 'edge_1': {'alpha': 0.8568036767638868, 'beta': 0.4340517999632362, 'r2': 0.13537699938480474, 'rmse_ms': 2858.8460300495476, 'n': 66}, 'edge_2': {'alpha': 0.8659150064963446, 'beta': 0.18973736694966825, 'r2': 0.02753382652814551, 'rmse_ms': 2921.029021363691, 'n': 82}}
 
-OVERHEAD_CALIBRATION = {'cloud': {'submit_overhead_ms': 487.5, 'container_startup_ms': 900.0, 'poll_overhead_ms': 3128.75}, 'edge_1': {'submit_overhead_ms': 179.48717948717947, 'container_startup_ms': 1525.6410256410256, 'poll_overhead_ms': 3468.7051282051284}, 'edge_2': {'submit_overhead_ms': 247.42268041237114, 'container_startup_ms': 1556.701030927835, 'poll_overhead_ms': 3493.536082474227}}
+OVERHEAD_CALIBRATION = {'cloud': {'submit_overhead_ms': 618.1818181818181, 'container_startup_ms': 709.0909090909091, 'poll_overhead_ms': 3148.6363636363635}, 'edge_1': {'submit_overhead_ms': 166.66666666666666, 'container_startup_ms': 1196.969696969697, 'poll_overhead_ms': 3521.8939393939395}, 'edge_2': {'submit_overhead_ms': 317.0731707317073, 'container_startup_ms': 1256.0975609756097, 'poll_overhead_ms': 3484.987804878049}}
 
 
 def workload_proxy_ms(cpu_requirement: float, deadline_ms: float) -> float:

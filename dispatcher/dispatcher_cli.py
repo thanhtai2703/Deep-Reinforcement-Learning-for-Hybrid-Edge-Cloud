@@ -48,17 +48,19 @@ logger = logging.getLogger("CLI")
 
 def _sample_deadline_ms(rng) -> float:
     """
-    Mixture distribution mô phỏng workload thật:
-      30% short  (2-5s)   — task gấp, dễ miss SLA → signal cho reject
-      50% medium (5-15s)  — task vừa, biên cold-start → signal cho load awareness
-      20% long   (15-30s) — task lỏng, gần như met → signal cho cost optimization
+    Mixture distribution mô phỏng workload thật trên K8s.
+    K8s overhead (submit+startup+poll) ≈ 5s, nên deadline tối thiểu
+    phải > 5s để task CÓ THỂ đạt SLA.
+      30% short  (8-15s)  — task gấp, chỉ kịp nếu chọn đúng node
+      50% medium (15-25s) — task vừa, hầu hết đạt SLA nếu dispatch tốt
+      20% long   (25-45s) — task thoải mái, signal cho cost optimization
     """
     tier = rng.choice(["short", "medium", "long"], p=[0.3, 0.5, 0.2])
     if tier == "short":
-        return float(rng.uniform(2000, 5000))
+        return float(rng.uniform(8000, 15000))
     if tier == "medium":
-        return float(rng.uniform(5000, 15000))
-    return float(rng.uniform(15000, 30000))
+        return float(rng.uniform(15000, 25000))
+    return float(rng.uniform(25000, 45000))
 
 
 def generate_tasks(count: int, seed: int = 42) -> list:

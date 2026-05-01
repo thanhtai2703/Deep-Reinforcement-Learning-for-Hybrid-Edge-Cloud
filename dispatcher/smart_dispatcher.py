@@ -101,6 +101,7 @@ class SmartDispatcher:
         self._dispatch_count = 0
         self._results: List[DispatchResult] = []
         self._results_lock = threading.Lock()
+        self._state_lock = threading.Lock()   # serialize state→predict→update
 
         # Load instance_map từ infra_config nếu không truyền vào
         if instance_map is None and not demo_mode:
@@ -162,21 +163,31 @@ class SmartDispatcher:
 
         Returns: DispatchResult
         """
-        # 1. Build state vector
-        state = self.state_builder.build_state(task)
-        metrics_summary = self.state_builder.get_current_metrics_summary()
+        # ── Phase 1: State → Predict → Update (serialized) ──
+        # Lock ensures concurrent threads see updated state from
+        # previous dispatches, preventing all-same-action collapse.
+        with self._state_lock:
+            # 1. Build state vector
+            state = self.state_builder.build_state(task)
+            metrics_summary = self.state_builder.get_current_metrics_summary()
 
-        # 2. Model predict
-        t0 = time.perf_counter()
-        action, q_values = self.model_loader.predict(state)
-        inference_ms = (time.perf_counter() - t0) * 1000
+            # 2. Model predict
+            t0 = time.perf_counter()
+            action, q_values = self.model_loader.predict(state)
+            inference_ms = (time.perf_counter() - t0) * 1000
 
-        # 3. Determine node
-        node_name = self.state_builder.get_node_name(action)
-        is_cloud = (action == self.n_edge_nodes)
-        is_reject = (action == self.reject_action)
+            # 3. Determine node
+            node_name = self.state_builder.get_node_name(action)
+            is_cloud = (action == self.n_edge_nodes)
+            is_reject = (action == self.reject_action)
 
-        # 4. Estimate latency & cost (skip for reject — task is dropped)
+            # 4. Update internal state IMMEDIATELY so next thread
+            #    sees the load impact of this dispatch.
+            self.state_builder.update_simulation_state(action, task)
+
+        # ── Phase 2: Execute + Log (parallel, outside lock) ──
+
+        # 5. Estimate latency & cost (skip for reject)
         if is_reject:
             est_latency_ms, est_cost, est_sla = 0.0, 0.0, False
         else:
@@ -184,9 +195,7 @@ class SmartDispatcher:
                 action, is_cloud, task
             )
 
-        # 5. Execute real backend.
-        # In demo mode, execution is skipped by default.
-        # Set FORCE_EXECUTE=true to create real K8s Jobs while still using demo metrics.
+        # 6. Execute real backend.
         import os as _os
         force_execute = _os.getenv("FORCE_EXECUTE", "false").lower() in ("1", "true", "yes")
 
@@ -201,17 +210,12 @@ class SmartDispatcher:
         real_latency_ms = exec_info["total_ms"]
         exec_status = exec_info["status"]
 
-        # latency_est_ms reported in DispatchResult: real if available, else est.
         if real_latency_ms is not None and exec_status == "succeeded":
             reported_latency = float(real_latency_ms)
             reported_sla = (reported_latency <= task.deadline_ms)
         else:
             reported_latency = est_latency_ms
             reported_sla = est_sla
-
-        # 6. Update simulation state
-        if self.demo_mode:
-            self.state_builder.update_simulation_state(action, task)
 
         # 7. Build result
         result = DispatchResult(

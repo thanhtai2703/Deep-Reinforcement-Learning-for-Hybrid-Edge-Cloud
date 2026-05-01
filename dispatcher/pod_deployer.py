@@ -37,7 +37,7 @@ class TimingBreakdown:
         return asdict(self)
 
 
-IMAGE_NAME = "ovapil/task-processor:v2"
+IMAGE_NAME = "taithanh/task-processor:v1"
 NAMESPACE = "default"
 KUBECONFIG_PATH = "/home/ubuntu/.kube/config"
 
@@ -95,6 +95,12 @@ def deploy_task_pod(
     timestamp = int(time.time() * 1000)
     job_name = f"task-{safe_task_id}-{timestamp}"[:63].rstrip("-")
 
+    # Bóp hiệu năng của Edge để tạo sự chênh lệch phần cứng (Throttling)
+    # Cloud chạy tẹt ga (theo request), Edge bị giới hạn cứng ở 200m (0.2 CPU)
+    limit_cpu = cpu_req
+    if target_role.startswith("edge"):
+        limit_cpu = "200m"  # Ép task trên Edge chạy chậm hơn Cloud gấp nhiều lần!
+
     container = client.V1Container(
         name="task-processor",
         image=image,
@@ -110,11 +116,11 @@ def deploy_task_pod(
         ],
         resources=client.V1ResourceRequirements(
             requests={
-                "cpu": cpu_req,
+                "cpu": limit_cpu,  # Sửa ở đây: requests không được vượt quá limits
                 "memory": ram_req,
             },
             limits={
-                "cpu": cpu_req,
+                "cpu": limit_cpu,
                 "memory": ram_req,
             },
         ),
