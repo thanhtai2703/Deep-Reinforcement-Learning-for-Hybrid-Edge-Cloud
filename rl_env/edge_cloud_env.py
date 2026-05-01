@@ -14,7 +14,7 @@ MAX_DEADLINE        = 500.0  # ms
 MAX_QUEUE           = 20.0   # Số task tối đa mỗi node có thể queue
 QUEUE_DECAY         = 0.85   # Hệ số decay queue mỗi step (mô phỏng task complete)
 NODE_FAILURE_PROB   = 0.005  # Xác suất 1 edge node fail mỗi step (training robustness)
-REJECT_PENALTY      = -0.5   # Reward cố định khi reject task
+REJECT_PENALTY      = -0.8   # Phạt nặng reject để agent ưu tiên dispatch
 
 
 class EdgeCloudEnv(gym.Env):

@@ -49,6 +49,11 @@ RTT_TIMEOUT_S = 1.0     # Timeout HTTP probe (giây)
 RTT_FAIL_MS   = 999.0   # Giá trị khi node không reachable
 RTT_CACHE_TTL = 10.0    # Cache RTT trong 10s để tránh flood probe
 
+# Prometheus rate-limit: chỉ fetch mới sau N giây.
+# Giữa các lần fetch, internal state phản ánh update_simulation_state()
+# → DQN thấy load tích lũy từ dispatch trước đó.
+PROM_REFRESH_INTERVAL = 5.0
+
 
 @dataclass
 class NodeMetrics:
@@ -146,11 +151,21 @@ class StateBuilder:
         """
         Xây dựng state vector đã normalize.
 
+        Prometheus is rate-limited to every PROM_REFRESH_INTERVAL seconds.
+        Between fetches, internal state reflects update_simulation_state()
+        calls — this is critical for concurrent dispatch so the DQN model
+        sees load accumulation from previous dispatches in the same batch.
+
         Returns: np.ndarray shape (obs_dim,) trong [0, 1]
         """
         if self.use_prometheus and self._prom_client is not None:
-            self._fetch_prometheus_metrics()
-        # Nếu không dùng Prometheus, dùng state đã cache (simulation)
+            now = time.time()
+            if not hasattr(self, '_prom_last_fetch'):
+                self._prom_last_fetch = 0.0
+            if now - self._prom_last_fetch >= PROM_REFRESH_INTERVAL:
+                self._fetch_prometheus_metrics()
+                self._prom_last_fetch = now
+        # Nếu không fetch, dùng state đã cache (simulation hoặc last prom + sim updates)
 
         return self._compose_observation(task)
 

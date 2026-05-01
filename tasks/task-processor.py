@@ -50,21 +50,24 @@ def parse_memory_to_mb(value: str) -> int:
 
 def burn_cpu(duration_seconds: float, cpu_cores: float):
     """
-    CPU burn workload. More requested CPU -> more hashing work per loop.
+    CPU burn workload. Cố định khối lượng tính toán thay vì thời gian.
+    Nếu K8s bóp băng thông CPU (limits), quá trình này sẽ tự nhiên mất nhiều thời gian hơn.
     """
-    start = time.time()
-    iterations = 0
+    # Trung bình 1 giây 1 nhân CPU có thể giải 1,000,000 mã băm SHA256
+    total_hashes = int(1_000_000 * duration_seconds * max(cpu_cores, 0.1))
+    
     payload = b"edge-cloud-task"
-
-    intensity = max(int(cpu_cores * 10000), 1000)
-
-    while time.time() - start < duration_seconds:
+    
+    # Giữ nguyên cấu trúc chia nhỏ chunk để log không bị đổi format
+    chunk_size = max(int(cpu_cores * 10000), 1000)
+    iterations_needed = max(1, total_hashes // chunk_size)
+    
+    for _ in range(iterations_needed):
         data = payload
-        for _ in range(intensity):
+        for _ in range(chunk_size):
             data = hashlib.sha256(data).digest()
-        iterations += 1
-
-    return iterations
+            
+    return iterations_needed
 
 
 def allocate_memory(memory_mb: int, ram_intensity: float):
