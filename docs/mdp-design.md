@@ -2,7 +2,7 @@
 
 ## 1. Problem Statement
 
-Goal: learn a dispatch policy that selects the best execution target for each incoming task in a hybrid system with two edge nodes and one cloud node.
+Goal: learn a dispatch policy that selects the best execution target for each incoming task in a hybrid system with n edge nodes and one cloud node (default experiments use 2 edges).
 
 Primary objectives:
 
@@ -16,75 +16,95 @@ Primary objectives:
 - Environment: abstracted edge-cloud system state
 - One step: one incoming task decision
 
-## 3. Action Space
+## 3. MDP Diagram
 
-Discrete action space:
+```mermaid
+flowchart LR
+	S["state s_t\n(edge metrics, cloud metrics,\n task, temporal)"]
+	P["policy\n(DQN or PPO)"]
+	E["env dynamics\n(load update, queue decay,\n new task)"]
+	R["reward r_t"]
+	S2["next state s_{t+1}"]
+	S --> P
+	P -->|action a_t\nedge_i, cloud, reject| E
+	E --> R
+	E --> S2
+```
 
-- action `0`: dispatch to `edge_1`
-- action `1`: dispatch to `edge_2`
-- action `2`: dispatch to `cloud`
+## 4. Action Space
+
+Discrete action space of size `n_edge_nodes + 2`:
+
+- actions `0..n_edge_nodes-1`: dispatch to `edge_i`
+- action `n_edge_nodes`: dispatch to `cloud`
+- action `n_edge_nodes + 1`: reject (drop task)
 
 Notes:
 
-- This 3-action mapping is the target production mapping for 2-edge-1-cloud deployment.
-- Simulator remains configurable by `n_edge_nodes`, but experiments for the report should use 2 edge nodes to match infrastructure.
+- For 2-edge-1-cloud: `0 -> edge_1`, `1 -> edge_2`, `2 -> cloud`, `3 -> reject`.
+- Baseline policies never choose `reject` (RL only).
 
-## 4. State Space (14 dimensions)
+## 5. State Space (17 dimensions for 2 edges, `4n + 9` in general)
 
-State vector at step `t`:
+State vector at step `t` (order matches implementation):
 
 1. `edge1_cpu` in [0, 1]
 2. `edge1_ram` in [0, 1]
-3. `edge1_queue` in [0, 1]
-4. `edge1_latency` in [0, 1]
+3. `edge1_latency` in [0, 1]
+4. `edge1_queue` in [0, 1]
 5. `edge2_cpu` in [0, 1]
 6. `edge2_ram` in [0, 1]
-7. `edge2_queue` in [0, 1]
-8. `edge2_latency` in [0, 1]
+7. `edge2_latency` in [0, 1]
+8. `edge2_queue` in [0, 1]
 9. `cloud_cpu` in [0, 1]
 10. `cloud_ram` in [0, 1]
 11. `cloud_latency` in [0, 1]
-12. `task_cpu_demand` in [0, 1]
-13. `task_ram_demand` in [0, 1]
-14. `task_deadline` in [0, 1]
+12. `cloud_queue` in [0, 1]
+13. `task_cpu_demand` in [0, 1]
+14. `task_ram_demand` in [0, 1]
+15. `task_deadline` in [0, 1]
+16. `hour_sin` in [0, 1]
+17. `hour_cos` in [0, 1]
 
-Normalization references:
+Normalization references (uncalibrated env):
 
 - CPU, RAM: percent / 100
-- queue length: value / queue_max (recommend queue_max=20)
-- latency: ms / latency_max (recommend latency_max=200)
-- deadline: ms / deadline_max (recommend deadline_max=500)
+- queue length: value / queue_max (queue_max = 20)
+- latency: ms / latency_max (latency_max = 200)
+- deadline: ms / deadline_max (deadline_max = 500)
+- temporal: `(sin/cos + 1) / 2`
 
-## 5. Transition Dynamics (High-level)
+Calibrated env uses latency_max = 30000 and deadlines in [2000, 30000] ms.
+
+## 6. Transition Dynamics (High-level)
 
 After action selection:
 
-- selected node gets extra CPU/RAM load based on task demand
-- queue length changes based on arrival and service
-- observed latency follows current load and network condition
-- non-selected nodes decay toward lower utilization over time
+- if `reject`, do not update load and apply fixed penalty
+- otherwise estimate latency, cost, and SLA for the selected node
+- update node load and queue for the selected node
+- decay queues and add small noise to metrics
+- sample a new task and build the next state
 
-## 6. Reward Design
+## 7. Reward Design
 
-Use weighted multi-objective reward:
+Reward in code uses smooth SLA signal with latency and cost penalties.
 
-`R_t = w1 * (-latency_norm) + w2 * (-cost_norm) + w3 * SLA_term + w4 * balance_bonus`
+$$
+latency\_norm = \frac{latency}{latency\_max}, \quad cost\_norm = \frac{cost}{CLOUD\_COST\_PER\_UNIT \cdot 110}
+$$
 
-Recommended initial weights:
+$$
+slack = \frac{deadline - latency}{\max(deadline, 1)}, \quad sla\_signal = \tanh(3 \cdot slack)
+$$
 
-- `w1 = 0.6` (latency)
-- `w2 = 0.2` (cost)
-- `w3 = 1.0` (SLA bonus, or -2.0 penalty if deadline miss)
-- `w4 = 0.1` (load-balance optional)
+$$
+R_t = -0.5 \cdot latency\_norm - 0.2 \cdot cost\_norm + 0.5 \cdot sla\_signal - 0.5 \cdot \mathbb{1}[\text{SLA miss}]
+$$
 
-SLA term example:
+If `reject`, then $R_t = -0.5$.
 
-- if task meets deadline: `+1.0`
-- else: `-2.0`
-
-Reward clipping (optional): clip to [-10, 5] for training stability.
-
-## 7. Baseline Policies for Comparison
+## 8. Baseline Policies for Comparison
 
 Implemented in `rl_env/baseline_policies.py`:
 
@@ -95,9 +115,9 @@ Implemented in `rl_env/baseline_policies.py`:
 - CloudOnly
 - Threshold heuristic
 
-These baselines provide non-RL references for report comparisons.
+These baselines provide non-RL references for report comparisons and never pick `reject`.
 
-## 8. Evaluation Metrics
+## 9. Evaluation Metrics
 
 Mandatory metrics:
 
@@ -112,7 +132,7 @@ Additional metrics:
 - policy decision distribution
 - node utilization profile
 
-## 9. Training Plan
+## 10. Training Plan
 
 Phase 1 (fast validation):
 
@@ -126,7 +146,7 @@ Selection rule:
 
 - choose best model by SLA first, then latency, then cost
 
-## 10. Week 1 Deliverable Checklist
+## 11. Week 1 Deliverable Checklist
 
 - [x] action/state/reward formalization documented
 - [x] baseline policy set defined and implemented

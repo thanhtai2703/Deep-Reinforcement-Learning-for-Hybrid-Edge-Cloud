@@ -116,12 +116,13 @@ class EdgeCloudEnvCalibrated(EdgeCloudEnv):
         cost: float,
         sla_met: bool,
         deadline: float,
+        action: int = 0,
+        is_cloud: bool = False,
         is_reject: bool = False,
     ) -> float:
         """
         Override: normalize latency by CAL_MAX_LATENCY_MS=30s, not 200ms.
-        Without this, latency_norm saturates at 100+ and gradient vanishes.
-        Reward shape and weights match base env.
+        Same 5-objective structure as base env (anti-collapse design).
         """
         from rl_env.edge_cloud_env import REJECT_PENALTY
         if is_reject:
@@ -131,9 +132,27 @@ class EdgeCloudEnvCalibrated(EdgeCloudEnv):
         cost_norm = cost / (CLOUD_COST_PER_UNIT * 110)
         slack = (deadline - latency) / max(deadline, 1.0)
         sla_signal = float(np.tanh(3.0 * slack))
-        reward = -0.5 * latency_norm - 0.2 * cost_norm + 0.5 * sla_signal
+
+        # Overload penalty (same logic as base env)
+        if is_cloud:
+            selected_cpu = self._cloud_cpu
+        else:
+            selected_cpu = self._edge_cpu[action]
+        overload_signal = float((np.tanh((selected_cpu - 60.0) / 15.0) + 1.0) / 2.0)
+
+        # Load balance
+        all_cpus = np.append(self._edge_cpu, self._cloud_cpu)
+        load_std = float(np.std(all_cpus) / 100.0)
+
+        reward = (
+            + 0.35 * sla_signal
+            - 0.20 * latency_norm
+            - 0.25 * cost_norm
+            - 0.15 * overload_signal
+            - 0.05 * load_std
+        )
         if not sla_met:
-            reward -= 0.5
+            reward -= 0.25
         return float(reward)
 
     def _build_obs(self) -> np.ndarray:
@@ -176,17 +195,18 @@ class EdgeCloudEnvCalibrated(EdgeCloudEnv):
     def _simulate_execution(self, action: int, is_cloud: bool):
         """
         Calibrated execution time using fitted constants per role.
+        Includes network latency differentiation:
+          - Edge: LAN latency (low, from _edge_latency)
+          - Cloud: WAN latency (higher, from _cloud_latency)
+        This models the real task offloading tradeoff.
+
         Returns: (latency_ms, cost, sla_met)
         """
-        # Reject branch handled by caller (env.step), not here.
         if action >= self.n_edge_nodes + 1:
             return 0.0, 0.0, False
 
         role = self._action_to_role(action, is_cloud)
 
-        # Pick task params and node CPU. In sim, we use current snapshot CPU
-        # as proxy for cpu_during_exec — fine because β≈0 in our fit
-        # (cgroup isolation), so this term contributes little.
         task_cpu_req = self._task["cpu_req"]
         task_ram_req = self._task["ram_req"]
         deadline = self._task["deadline"]
@@ -194,21 +214,25 @@ class EdgeCloudEnvCalibrated(EdgeCloudEnv):
         if is_cloud:
             node_cpu = self._cloud_cpu
             cost_rate = CLOUD_COST_PER_UNIT
+            # WAN network latency (from _simulate_node_metrics: 30-80ms + cpu*0.2)
+            network_latency = self._cloud_latency
         else:
             node_cpu = self._edge_cpu[action]
             cost_rate = EDGE_COST_PER_UNIT
+            # LAN network latency (from _simulate_node_metrics: 5-30ms + cpu*0.3)
+            network_latency = self._edge_latency[action]
 
-        # Calibrated end-to-end latency.
-        # NOTE: env's task spec uses cpu_req / deadline in the same units
-        # as dispatcher (TaskInfo), so workload_proxy formula matches.
-        latency = predict_total_ms(
+        # Calibrated K8s execution latency (overhead + CPU burn)
+        k8s_latency = predict_total_ms(
             role=role,
             cpu_requirement=task_cpu_req,
             deadline_ms=deadline,
             cpu_during_exec=float(node_cpu),
         )
 
-        # Cost is workload-only; unchanged from base env.
+        # Total = K8s execution + network round-trip
+        latency = k8s_latency + network_latency
+
         cost = (task_cpu_req + task_ram_req) * cost_rate
         sla_met = latency <= deadline
 

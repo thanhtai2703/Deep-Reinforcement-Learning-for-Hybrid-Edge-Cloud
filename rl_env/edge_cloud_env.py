@@ -108,7 +108,9 @@ class EdgeCloudEnv(gym.Env):
         else:
             latency, cost, sla_met = self._simulate_execution(action, is_cloud)
             reward = self._compute_reward(latency, cost, sla_met,
-                                          self._task["deadline"], is_reject=False)
+                                          self._task["deadline"],
+                                          action=action, is_cloud=is_cloud,
+                                          is_reject=False)
             self._update_node_load(action, is_cloud)
 
         # Inject node failure ngẫu nhiên để training robust với scenario thực tế
@@ -269,21 +271,27 @@ class EdgeCloudEnv(gym.Env):
         return float(latency), float(cost), bool(sla_met)
 
     def _update_node_load(self, action: int, is_cloud: bool):
-        """Cập nhật tải CPU/RAM/Queue sau khi node nhận task."""
+        """Cập nhật tải CPU/RAM/Queue sau khi node nhận task.
+
+        Decay 0.92 (chậm hơn 0.85 cũ) để load tích lũy rõ hơn,
+        giúp agent thấy hậu quả dài hạn khi đổ hết task lên 1 node.
+        Load factor edge 0.6 / cloud 0.4 mạnh hơn cũ (0.5/0.3)
+        để phản ánh resource-constrained edge vs resource-abundant cloud.
+        """
         task_cpu = self._task["cpu_req"]
         task_ram = self._task["ram_req"]
-        decay    = 0.85  # Tải giảm dần theo thời gian (decay)
+        decay    = 0.92
 
         if is_cloud:
-            self._cloud_cpu = np.clip(self._cloud_cpu * decay + task_cpu * 0.3, 5, 99)
-            self._cloud_ram = np.clip(self._cloud_ram * decay + task_ram * 0.3, 5, 99)
+            self._cloud_cpu = np.clip(self._cloud_cpu * decay + task_cpu * 0.4, 5, 99)
+            self._cloud_ram = np.clip(self._cloud_ram * decay + task_ram * 0.4, 5, 99)
             self._cloud_queue = float(np.clip(self._cloud_queue + 1, 0, MAX_QUEUE))
         else:
             self._edge_cpu[action] = np.clip(
-                self._edge_cpu[action] * decay + task_cpu * 0.5, 5, 99
+                self._edge_cpu[action] * decay + task_cpu * 0.6, 5, 99
             )
             self._edge_ram[action] = np.clip(
-                self._edge_ram[action] * decay + task_ram * 0.5, 5, 99
+                self._edge_ram[action] * decay + task_ram * 0.6, 5, 99
             )
             self._edge_queue[action] = float(np.clip(
                 self._edge_queue[action] + 1, 0, MAX_QUEUE
@@ -295,32 +303,58 @@ class EdgeCloudEnv(gym.Env):
         cost: float,
         sla_met: bool,
         deadline: float,
+        action: int = 0,
+        is_cloud: bool = False,
         is_reject: bool = False,
     ) -> float:
         """
-        Hàm thưởng cân bằng 3 mục tiêu:
-          1. Giảm latency
-          2. Giảm chi phí
-          3. Đảm bảo SLA — dùng tín hiệu liên tục (tanh) thay vì discrete
+        Hàm thưởng cho bài toán Task Offloading (Edge vs Cloud).
 
-        Reward dương khi xong nhanh hơn deadline nhiều, âm khi miss.
+        Cân bằng 5 mục tiêu:
+          1. SLA compliance  (0.35) — task hoàn thành trước deadline
+          2. Latency          (0.20) — giảm thời gian phản hồi
+          3. Cost             (0.25) — ưu tiên edge (rẻ hơn)
+          4. Overload penalty  (0.15) — tránh gửi task lên node quá tải
+          5. Load balance     (0.05) — phân tải đều giữa các node
+
+        Thiết kế chống collapse:
+          - Overload penalty tăng mượt khi CPU > 60%, vượt cost advantage
+            khi CPU > 80% → agent buộc phải đa dạng hoá action
+          - SLA miss penalty giảm (0.25 thay vì 0.5) để agent không quá
+            risk-averse (luôn chọn cloud vì "an toàn")
         """
         if is_reject:
             return REJECT_PENALTY
 
+        # ── Core objectives ──
         latency_norm = latency / MAX_LATENCY                  # [0, 1]
         cost_norm    = cost / (CLOUD_COST_PER_UNIT * 110)     # [0, 1]
 
-        # SLA continuous: slack > 0 nếu kịp deadline, < 0 nếu miss
-        # tanh(3 * slack) → [-1, 1], smooth gradient quanh 0
         slack      = (deadline - latency) / max(deadline, 1.0)
-        sla_signal = float(np.tanh(3.0 * slack))
+        sla_signal = float(np.tanh(3.0 * slack))              # [-1, 1]
 
-        reward = -0.5 * latency_norm - 0.2 * cost_norm + 0.5 * sla_signal
+        # ── Overload penalty: smooth sigmoid quanh CPU=60% ──
+        if is_cloud:
+            selected_cpu = self._cloud_cpu
+        else:
+            selected_cpu = self._edge_cpu[action]
+        overload_signal = float((np.tanh((selected_cpu - 60.0) / 15.0) + 1.0) / 2.0)
 
-        # Penalty bổ sung khi miss thực sự (cứng hơn để model học tránh)
+        # ── Load balance: std of all node CPUs ──
+        all_cpus = np.append(self._edge_cpu, self._cloud_cpu)
+        load_std = float(np.std(all_cpus) / 100.0)            # [0, ~0.4]
+
+        # ── Combine ──
+        reward = (
+            + 0.35 * sla_signal
+            - 0.20 * latency_norm
+            - 0.25 * cost_norm
+            - 0.15 * overload_signal
+            - 0.05 * load_std
+        )
+
         if not sla_met:
-            reward -= 0.5
+            reward -= 0.25
 
         return float(reward)
 

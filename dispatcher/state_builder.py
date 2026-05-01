@@ -170,8 +170,11 @@ class StateBuilder:
         Cập nhật internal state sau khi dispatch (simulation mode).
         Mô phỏng tải tăng và queue tăng ở node được chọn, decay ở các node khác.
         Action == reject (n_edge_nodes + 1) → không cập nhật load.
+
+        Decay/load factors PHẢI khớp với rl_env/edge_cloud_env.py để model
+        thấy cùng dynamics lúc inference như lúc training.
         """
-        decay = 0.85
+        decay = 0.92
         queue_decay = 0.85
         is_reject = (action == self.n_edge_nodes + 1)
 
@@ -179,10 +182,10 @@ class StateBuilder:
             m = self._edge_metrics[i]
             if (not is_reject) and i == action:
                 m.cpu_percent = float(np.clip(
-                    m.cpu_percent * decay + task.cpu_requirement * 0.5, 5, 99
+                    m.cpu_percent * decay + task.cpu_requirement * 0.6, 5, 99
                 ))
                 m.ram_percent = float(np.clip(
-                    m.ram_percent * decay + task.ram_requirement * 0.5, 5, 99
+                    m.ram_percent * decay + task.ram_requirement * 0.6, 5, 99
                 ))
                 m.queue_length = float(np.clip(
                     m.queue_length + 1, 0, MAX_QUEUE
@@ -204,10 +207,10 @@ class StateBuilder:
         cm = self._cloud_metrics
         if (not is_reject) and action == self.n_edge_nodes:
             cm.cpu_percent = float(np.clip(
-                cm.cpu_percent * decay + task.cpu_requirement * 0.3, 5, 99
+                cm.cpu_percent * decay + task.cpu_requirement * 0.4, 5, 99
             ))
             cm.ram_percent = float(np.clip(
-                cm.ram_percent * decay + task.ram_requirement * 0.3, 5, 99
+                cm.ram_percent * decay + task.ram_requirement * 0.4, 5, 99
             ))
             cm.queue_length = float(np.clip(
                 cm.queue_length + 1, 0, MAX_QUEUE
