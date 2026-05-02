@@ -166,25 +166,30 @@ def run_comparison(args):
         results[policy_name] = summary
 
         logger.info(
-            "%-18s | SLA=%5.1f%% | Lat=%6.1fms | Cost=%.4f | Cloud=%4.1f%%",
+            "%-18s | SLA=%5.1f%% | Lat=%6.1fms | Cost=%.4f | "
+            "Edge=%4.1f%% Cloud=%4.1f%% Rej=%4.1f%%",
             policy_name, summary["sla_rate"], summary["avg_latency_ms"],
-            summary["avg_cost"], summary["cloud_usage_pct"],
+            summary["avg_cost"],
+            summary["edge_usage_pct"], summary["cloud_usage_pct"],
+            summary["reject_usage_pct"],
         )
 
     # Print comparison table
     rl_names = set(rl_models.keys())
-    print(f"\n{'=' * 80}")
+    print(f"\n{'=' * 96}")
     print(f"{'Policy':<20} {'SLA%':>8} {'Avg Lat(ms)':>12} "
-          f"{'P95 Lat(ms)':>12} {'Avg Cost':>10} {'Cloud%':>8}")
-    print(f"{'-' * 80}")
+          f"{'P95 Lat(ms)':>12} {'Avg Cost':>10} {'Edge%':>7} "
+          f"{'Cloud%':>7} {'Rej%':>6}")
+    print(f"{'-' * 96}")
     for name, s in results.items():
         marker = " <-- RL" if name in rl_names else ""
         print(
             f"{name:<20} {s['sla_rate']:>8.1f} {s['avg_latency_ms']:>12.1f} "
             f"{s['p95_latency_ms']:>12.1f} {s['avg_cost']:>10.5f} "
-            f"{s['cloud_usage_pct']:>8.1f}{marker}"
+            f"{s['edge_usage_pct']:>7.1f} {s['cloud_usage_pct']:>7.1f} "
+            f"{s['reject_usage_pct']:>6.1f}{marker}"
         )
-    print(f"{'=' * 80}\n")
+    print(f"{'=' * 96}\n")
 
     # Save CSV
     os.makedirs("experiments/logs", exist_ok=True)

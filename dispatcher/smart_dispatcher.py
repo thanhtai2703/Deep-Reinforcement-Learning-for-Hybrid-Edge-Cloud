@@ -700,7 +700,9 @@ class SmartDispatcher:
         costs = [r.cost_est for r in self._results]
         nodes = [r.selected_node for r in self._results]
 
-        cloud_count = sum(1 for n in nodes if n == "cloud")
+        cloud_count  = sum(1 for n in nodes if n == "cloud")
+        reject_count = sum(1 for n in nodes if n == "rejected")
+        edge_count   = len(nodes) - cloud_count - reject_count
 
         return {
             "total": self._dispatch_count,
@@ -708,8 +710,9 @@ class SmartDispatcher:
             "avg_latency_ms": round(float(np.mean(latencies)), 1),
             "p95_latency_ms": round(float(np.percentile(latencies, 95)), 1),
             "avg_cost": round(float(np.mean(costs)), 5),
-            "cloud_usage_pct": round(cloud_count / len(nodes) * 100, 1),
-            "edge_usage_pct": round((len(nodes) - cloud_count) / len(nodes) * 100, 1),
+            "edge_usage_pct":   round(edge_count   / len(nodes) * 100, 1),
+            "cloud_usage_pct":  round(cloud_count  / len(nodes) * 100, 1),
+            "reject_usage_pct": round(reject_count / len(nodes) * 100, 1),
             "policy": self.policy_name,
         }
 
@@ -726,8 +729,9 @@ class SmartDispatcher:
         print(f"  Avg Latency   : {s['avg_latency_ms']:.1f} ms")
         print(f"  P95 Latency   : {s['p95_latency_ms']:.1f} ms")
         print(f"  Avg Cost      : {s['avg_cost']:.5f}")
-        print(f"  Cloud Usage   : {s['cloud_usage_pct']:.1f}%")
         print(f"  Edge Usage    : {s['edge_usage_pct']:.1f}%")
+        print(f"  Cloud Usage   : {s['cloud_usage_pct']:.1f}%")
+        print(f"  Reject Usage  : {s['reject_usage_pct']:.1f}%")
         print(f"{'=' * 55}\n")
 
     def switch_policy(self, policy_name: str, model_path: Optional[str] = None):

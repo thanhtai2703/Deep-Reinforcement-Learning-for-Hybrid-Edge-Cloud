@@ -146,10 +146,10 @@ class EdgeCloudEnvCalibrated(EdgeCloudEnv):
 
         reward = (
             + 0.35 * sla_signal
-            - 0.20 * latency_norm
-            - 0.25 * cost_norm
-            - 0.15 * overload_signal
-            - 0.05 * load_std
+            - 0.15 * latency_norm
+            - 0.20 * cost_norm
+            - 0.40 * overload_signal  # TĂNG MẠNH: Tránh xa các node đang full CPU!
+            - 0.15 * load_std         # TĂNG MẠNH: Ép buộc phải chia đều task ra các node
         )
         if not sla_met:
             reward -= 0.25

@@ -17,6 +17,7 @@ import sys
 import csv
 import time
 import numpy as np
+import torch
 import matplotlib
 matplotlib.use("Agg")   # Non-interactive backend (server)
 import matplotlib.pyplot as plt
@@ -70,6 +71,30 @@ DQN_HYPERPARAMS = DQNConfig(
 # Helper functions
 # ---------------------------------------------------------------------------
 
+def collect_reference_states(env: EdgeCloudEnv, n: int = 256, seed: int = 123) -> np.ndarray:
+    """
+    Sample một batch state cố định để theo dõi mean Q-value xuyên suốt training.
+    Q ổn định trên batch này → bằng chứng convergence (Mnih et al. 2015 Fig. 2).
+    """
+    states = []
+    obs, _ = env.reset(seed=seed)
+    while len(states) < n:
+        states.append(obs.copy())
+        action = env.action_space.sample()
+        obs, _, terminated, truncated, _ = env.step(action)
+        if terminated or truncated:
+            obs, _ = env.reset()
+    return np.array(states[:n], dtype=np.float32)
+
+
+def compute_mean_q(agent: DQNAgent, ref_states: np.ndarray) -> float:
+    """Mean of max-Q over reference states. Tăng đều rồi phẳng = đã hội tụ."""
+    states_t = torch.FloatTensor(ref_states).to(agent.device)
+    with torch.no_grad():
+        q = agent.q_net(states_t)
+    return float(q.max(dim=1).values.mean().item())
+
+
 def evaluate_agent(agent: DQNAgent, env: EdgeCloudEnv, n_episodes: int = 20) -> dict:
     """
     Đánh giá agent trong chế độ greedy (không explore).
@@ -108,25 +133,46 @@ def setup_dirs(*dirs):
         os.makedirs(d, exist_ok=True)
 
 
+def _moving_average(x: list, window: int = 5) -> np.ndarray:
+    """Simple moving average; trả về cùng độ dài (padding bằng NaN ở đầu)."""
+    if len(x) < window:
+        return np.array(x, dtype=float)
+    arr = np.array(x, dtype=float)
+    out = np.full_like(arr, np.nan)
+    out[window - 1:] = np.convolve(arr, np.ones(window) / window, mode="valid")
+    return out
+
+
 def plot_training_curves(log_path: str, plot_dir: str):
-    """Vẽ reward, latency, SLA rate theo episode."""
-    episodes, rewards, latencies, sla_rates, epsilons = [], [], [], [], []
+    """Vẽ reward (eval + train smoothed), latency, SLA rate, epsilon theo episode."""
+    episodes, train_rewards, eval_rewards = [], [], []
+    latencies, sla_rates, epsilons = [], [], []
 
     with open(log_path) as f:
         reader = csv.DictReader(f)
         for row in reader:
             episodes.append(int(row["episode"]))
-            rewards.append(float(row["eval_avg_reward"]))
+            train_rewards.append(float(row["train_reward"]))
+            eval_rewards.append(float(row["eval_avg_reward"]))
             latencies.append(float(row["eval_avg_latency"]))
             sla_rates.append(float(row["eval_sla_rate"]))
             epsilons.append(float(row["epsilon"]))
 
+    train_smooth = _moving_average(train_rewards, window=5)
+
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle("DQN Training Curves – EdgeCloud Task Scheduling", fontsize=14, fontweight="bold")
 
-    axes[0, 0].plot(episodes, rewards, color="#2196F3", linewidth=1.5)
-    axes[0, 0].set_title("Average Reward per Evaluation")
+    # Reward: train (raw + smooth) vs eval — overlay để check overfit
+    axes[0, 0].plot(episodes, train_rewards, color="#90CAF9", linewidth=1.0,
+                    alpha=0.5, label="Train (raw)")
+    axes[0, 0].plot(episodes, train_smooth, color="#1976D2", linewidth=1.8,
+                    label="Train (MA-5)")
+    axes[0, 0].plot(episodes, eval_rewards, color="#D32F2F", linewidth=1.8,
+                    label="Eval (greedy)")
+    axes[0, 0].set_title("Reward — Train vs Eval (overfit check)")
     axes[0, 0].set_xlabel("Episode"); axes[0, 0].set_ylabel("Avg Reward")
+    axes[0, 0].legend(loc="lower right", fontsize=9)
     axes[0, 0].grid(True, alpha=0.3)
 
     axes[0, 1].plot(episodes, latencies, color="#F44336", linewidth=1.5)
@@ -135,7 +181,6 @@ def plot_training_curves(log_path: str, plot_dir: str):
     axes[0, 1].grid(True, alpha=0.3)
 
     axes[1, 0].plot(episodes, sla_rates, color="#4CAF50", linewidth=1.5)
-    axes[1, 0].axhline(y=95, color="orange", linestyle="--", label="Target 95%")
     axes[1, 0].set_title("SLA Rate (%)")
     axes[1, 0].set_xlabel("Episode"); axes[1, 0].set_ylabel("SLA (%)")
     axes[1, 0].legend(); axes[1, 0].grid(True, alpha=0.3)
@@ -147,6 +192,41 @@ def plot_training_curves(log_path: str, plot_dir: str):
 
     plt.tight_layout()
     path = os.path.join(plot_dir, "training_curves.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[Plot] Saved → {path}")
+
+
+def plot_loss_q_curves(log_path: str, plot_dir: str):
+    """
+    Bằng chứng hội tụ: TD-loss giảm + Mean-Q phẳng.
+    - Loss (log scale): khi loss vẫn còn dao động lớn → chưa hội tụ.
+    - Mean Q: tăng dần rồi bão hòa = Q-function đã ổn định trên reference states.
+    """
+    episodes, losses, mean_qs = [], [], []
+    with open(log_path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            episodes.append(int(row["episode"]))
+            losses.append(max(float(row["loss"]), 1e-8))   # tránh log(0)
+            mean_qs.append(float(row.get("mean_q", "nan")))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 4.5))
+    fig.suptitle("DQN Convergence Diagnostics", fontsize=13, fontweight="bold")
+
+    axes[0].plot(episodes, losses, color="#FF7043", linewidth=1.5)
+    axes[0].set_yscale("log")
+    axes[0].set_title("TD-Loss (Huber, log scale)")
+    axes[0].set_xlabel("Episode"); axes[0].set_ylabel("Loss")
+    axes[0].grid(True, alpha=0.3, which="both")
+
+    axes[1].plot(episodes, mean_qs, color="#3949AB", linewidth=1.8)
+    axes[1].set_title("Mean max-Q on reference states")
+    axes[1].set_xlabel("Episode"); axes[1].set_ylabel("E[max_a Q(s,a)]")
+    axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    path = os.path.join(plot_dir, "convergence_diagnostics.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"[Plot] Saved → {path}")
@@ -189,6 +269,10 @@ def train():
     agent = DQNAgent(obs_dim, n_actions, DQN_HYPERPARAMS)
     print(agent)
 
+    # Reference states để track mean Q-value xuyên suốt training
+    ref_states = collect_reference_states(eval_env, n=256, seed=cfg["seed"] + 1)
+    print(f"  Reference states for Q-tracking: {ref_states.shape}")
+
     # CSV logger
     log_path = os.path.join(cfg["log_dir"], "train_log.csv")
     with open(log_path, "w", newline="") as f:
@@ -196,7 +280,7 @@ def train():
         writer.writerow([
             "episode", "train_reward", "steps", "loss",
             "epsilon", "eval_avg_reward", "eval_avg_latency",
-            "eval_sla_rate", "eval_avg_cost", "elapsed_sec"
+            "eval_sla_rate", "eval_avg_cost", "mean_q", "elapsed_sec"
         ])
 
     best_reward = -np.inf
@@ -231,6 +315,7 @@ def train():
         # ── Evaluation checkpoint ──────────────────────────────────────────
         if episode % cfg["eval_interval"] == 0:
             metrics  = evaluate_agent(agent, eval_env, cfg["eval_episodes"])
+            mean_q   = compute_mean_q(agent, ref_states)
             elapsed  = time.time() - start_time
 
             print(
@@ -239,6 +324,7 @@ def train():
                 f"eval_r={metrics['avg_reward']:6.2f} | "
                 f"lat={metrics['avg_latency']:6.1f}ms | "
                 f"SLA={metrics['sla_rate']:5.1f}% | "
+                f"meanQ={mean_q:6.3f} | "
                 f"eps={agent.epsilon:.3f} | "
                 f"loss={avg_loss:.4f} | "
                 f"{elapsed:.0f}s"
@@ -254,6 +340,7 @@ def train():
                     round(metrics["avg_latency"], 2),
                     round(metrics["sla_rate"], 2),
                     round(metrics["avg_cost"], 6),
+                    round(mean_q, 4),
                     round(elapsed, 1),
                 ])
 
@@ -276,6 +363,7 @@ def train():
 
     # Vẽ training curves
     plot_training_curves(log_path, cfg["plot_dir"])
+    plot_loss_q_curves(log_path, cfg["plot_dir"])
 
     return agent
 
