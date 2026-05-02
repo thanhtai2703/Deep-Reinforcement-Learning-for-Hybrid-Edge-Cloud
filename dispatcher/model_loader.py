@@ -30,7 +30,6 @@ _PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from models.dqn_agent import DQNAgent, DQNConfig
 from rl_env.baseline_policies import (
     BasePolicy,
     CloudOnlyPolicy,
@@ -70,7 +69,7 @@ class ModelLoader:
         self.n_edge_nodes = n_edge_nodes
 
         self._current_policy_name: str = ""
-        self._dqn_agent: Optional[DQNAgent] = None
+        self._dqn_agent = None  # Lazy-typed: models.dqn_agent.DQNAgent (torch)
         self._ppo_model = None  # stable_baselines3.PPO
         self._baseline: Optional[BasePolicy] = None
         self._model_path: Optional[str] = None
@@ -157,6 +156,7 @@ class ModelLoader:
 
     def _load_dqn(self, model_path: Optional[str]):
         """Load custom DQN agent."""
+        from models.dqn_agent import DQNAgent  # lazy import torch
         self._dqn_agent = DQNAgent(self.obs_dim, self.n_actions)
         self._ppo_model = None
         self._baseline = None
