@@ -28,6 +28,14 @@ from rl_env.baseline_policies import get_all_baselines, BasePolicy
 from models.dqn_agent import DQNAgent, DQNConfig
 
 
+def make_env(env_kind: str, **kwargs):
+    """Factory: env_kind in {'uncalibrated', 'calibrated'}. Phải khớp với env DQN đã train."""
+    if env_kind == "calibrated":
+        from rl_env.edge_cloud_env_calibrated import EdgeCloudEnvCalibrated
+        return EdgeCloudEnvCalibrated(**kwargs)
+    return EdgeCloudEnv(**kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -77,7 +85,8 @@ def run_evaluation(policy, env: EdgeCloudEnv, n_episodes: int, is_dqn: bool = Fa
 
         rewards.append(ep_reward)
 
-    n_actions    = env.n_actions
+    n_actions     = env.n_actions
+    n_edge_nodes  = env.n_edge_nodes      # action mapping: [0..n_edge-1]=edges, n_edge=cloud, n_edge+1=reject
     action_counts = [action_dist.count(i) for i in range(n_actions)]
     total_actions = len(action_dist)
 
@@ -88,8 +97,9 @@ def run_evaluation(policy, env: EdgeCloudEnv, n_episodes: int, is_dqn: bool = Fa
         "p95_latency":   np.percentile(latencies, 95),
         "avg_cost":      np.mean(costs),
         "sla_rate":      np.mean(sla_flags) * 100,
-        "edge_usage":    sum(action_counts[:-1]) / total_actions * 100,
-        "cloud_usage":   action_counts[-1] / total_actions * 100,
+        "edge_usage":    sum(action_counts[:n_edge_nodes]) / total_actions * 100,
+        "cloud_usage":   action_counts[n_edge_nodes] / total_actions * 100,
+        "reject_usage":  action_counts[n_edge_nodes + 1] / total_actions * 100,
     }
 
 
@@ -150,7 +160,7 @@ def plot_comparison(results: dict, plot_dir: str):
 
 
 def plot_action_distribution(results: dict, plot_dir: str):
-    """Pie chart Edge vs Cloud usage cho mỗi policy."""
+    """Pie chart Edge / Cloud / Reject usage cho mỗi policy."""
     names = list(results.keys())
     n     = len(names)
     fig, axes = plt.subplots(2, (n + 1) // 2, figsize=(4 * n, 8))
@@ -159,10 +169,16 @@ def plot_action_distribution(results: dict, plot_dir: str):
     for i, (name, data) in enumerate(results.items()):
         edge   = data["edge_usage"]
         cloud  = data["cloud_usage"]
+        reject = data.get("reject_usage", 0.0)
+        # Bỏ wedge có giá trị 0 để pie chart không hiển thị label nhầm lẫn
+        slices = [(edge, "Edge", "#00BCD4"),
+                  (cloud, "Cloud", "#F44336"),
+                  (reject, "Reject", "#9E9E9E")]
+        slices = [s for s in slices if s[0] > 0.01]
         axes[i].pie(
-            [edge, cloud],
-            labels=["Edge", "Cloud"],
-            colors=["#00BCD4", "#F44336"],
+            [s[0] for s in slices],
+            labels=[s[1] for s in slices],
+            colors=[s[2] for s in slices],
             autopct="%1.1f%%",
             startangle=140,
         )
@@ -189,13 +205,18 @@ def main():
     parser.add_argument("--model", default="models/checkpoints/dqn_best.pth",
                         help="Path to DQN model checkpoint")
     parser.add_argument("--episodes", type=int, default=EVAL_CONFIG["n_episodes"])
+    parser.add_argument("--env", choices=("uncalibrated", "calibrated"),
+                        default="calibrated",
+                        help="Eval env — PHẢI khớp với env DQN đã train (default: calibrated)")
     args = parser.parse_args()
 
     cfg = EVAL_CONFIG
     os.makedirs(cfg["log_dir"],  exist_ok=True)
     os.makedirs(cfg["plot_dir"], exist_ok=True)
 
-    env = EdgeCloudEnv(
+    print(f"  Eval env: {args.env}")
+    env = make_env(
+        args.env,
         n_edge_nodes  = cfg["n_edge_nodes"],
         use_prometheus= False,
         max_steps     = cfg["max_steps"],
@@ -221,24 +242,26 @@ def main():
         results[policy.name] = run_evaluation(policy, env, args.episodes)
 
     # ── Print table ─────────────────────────────────────────────────────────
-    print(f"\n{'='*85}")
+    print(f"\n{'='*95}")
     print(f"{'Policy':<22} {'Avg Reward':>11} {'Avg Lat(ms)':>12} "
-          f"{'SLA%':>8} {'Avg Cost':>10} {'Edge%':>7} {'Cloud%':>7}")
-    print(f"{'-'*85}")
+          f"{'SLA%':>8} {'Avg Cost':>10} {'Edge%':>7} {'Cloud%':>7} {'Reject%':>8}")
+    print(f"{'-'*95}")
     for name, m in results.items():
         marker = " ← DQN" if name == "DQN" else ""
         print(
             f"{name:<22} {m['avg_reward']:>11.3f} {m['avg_latency']:>12.1f} "
             f"{m['sla_rate']:>8.1f} {m['avg_cost']:>10.5f} "
-            f"{m['edge_usage']:>7.1f} {m['cloud_usage']:>7.1f}{marker}"
+            f"{m['edge_usage']:>7.1f} {m['cloud_usage']:>7.1f} "
+            f"{m['reject_usage']:>8.1f}{marker}"
         )
-    print(f"{'='*85}\n")
+    print(f"{'='*95}\n")
 
     # ── Save CSV ─────────────────────────────────────────────────────────────
     log_path = os.path.join(cfg["log_dir"], "evaluation_results.csv")
     with open(log_path, "w", newline="") as f:
         fieldnames = ["policy", "avg_reward", "std_reward", "avg_latency",
-                      "p95_latency", "sla_rate", "avg_cost", "edge_usage", "cloud_usage"]
+                      "p95_latency", "sla_rate", "avg_cost",
+                      "edge_usage", "cloud_usage", "reject_usage"]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for name, m in results.items():
