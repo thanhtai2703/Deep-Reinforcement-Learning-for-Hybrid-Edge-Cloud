@@ -63,19 +63,52 @@ def _sample_deadline_ms(rng) -> float:
     return float(rng.uniform(25000, 45000))
 
 
-def generate_tasks(count: int, seed: int = 42) -> list:
-    """Sinh danh sách tasks ngẫu nhiên để test."""
+def generate_tasks(count: int, seed: int = 42, mix: str = "default") -> list:
+    """
+    Sinh danh sách tasks để test.
+
+    mix:
+      - "default": uniform random (như cũ)
+      - "tiered": 3 class rõ rệt (40% light, 40% medium, 20% heavy)
+                  Để demo task-aware routing.
+    """
     rng = np.random.default_rng(seed)
     tasks = []
     for i in range(count):
-        tasks.append(TaskInfo(
-            task_id=f"task_{i + 1:06d}",
-            cpu_requirement=float(rng.uniform(5, 60)),
-            ram_requirement=float(rng.uniform(5, 50)),
-            deadline_ms=_sample_deadline_ms(rng),
-            priority=rng.choice(["low", "medium", "high"]),
-            payload_type=rng.choice(["compute", "image", "io"]),
-        ))
+        if mix == "tiered":
+            r = rng.random()
+            if r < 0.40:  # light
+                cpu = float(rng.uniform(5, 15))
+                ram = float(rng.uniform(5, 15))
+                deadline = float(rng.uniform(20000, 40000))
+                klass = "light"
+            elif r < 0.80:  # medium
+                cpu = float(rng.uniform(20, 40))
+                ram = float(rng.uniform(20, 30))
+                deadline = float(rng.uniform(10000, 25000))
+                klass = "medium"
+            else:  # heavy
+                cpu = float(rng.uniform(45, 60))
+                ram = float(rng.uniform(40, 50))
+                deadline = float(rng.uniform(8000, 15000))
+                klass = "heavy"
+            tasks.append(TaskInfo(
+                task_id=f"{klass}_{i + 1:06d}",
+                cpu_requirement=cpu,
+                ram_requirement=ram,
+                deadline_ms=deadline,
+                priority="high" if klass == "heavy" else "medium",
+                payload_type=klass,
+            ))
+        else:  # default
+            tasks.append(TaskInfo(
+                task_id=f"task_{i + 1:06d}",
+                cpu_requirement=float(rng.uniform(5, 60)),
+                ram_requirement=float(rng.uniform(5, 50)),
+                deadline_ms=_sample_deadline_ms(rng),
+                priority=rng.choice(["low", "medium", "high"]),
+                payload_type=rng.choice(["compute", "image", "io"]),
+            ))
     return tasks
 
 
@@ -89,7 +122,7 @@ def run_single_policy(args):
         demo_mode=args.demo,
     )
 
-    tasks = generate_tasks(args.num_tasks, seed=args.seed)
+    tasks = generate_tasks(args.num_tasks, seed=args.seed, mix=args.mix)
     logger.info(
         "Dispatching %d tasks with policy=%s concurrency=%d ...",
         len(tasks), args.policy, args.concurrency,
@@ -122,12 +155,70 @@ def run_single_policy(args):
     dispatcher.print_summary()
     logger.info("Total time: %.2fs (%.1f tasks/sec)", elapsed, len(tasks) / elapsed)
 
-    return dispatcher.get_summary()
+    summary = dispatcher.get_summary()
+
+    # Save summary to CSV (append mode — gom nhiều run vào 1 file)
+    if args.save_summary:
+        _append_summary_csv(args.save_summary, args, summary, elapsed)
+        logger.info("Summary appended to: %s", args.save_summary)
+
+    return summary
+
+
+def _append_summary_csv(path: str, args, summary: dict, elapsed: float):
+    """Flatten summary dict + append vào CSV. Tự tạo header nếu chưa có."""
+    n_edge = args.edges
+    fieldnames = ["timestamp", "policy", "n_tasks", "concurrency", "seed",
+                  "elapsed_sec", "tasks_per_sec",
+                  "sla_rate", "sla_count",
+                  "lat_mean", "lat_median", "lat_p95", "lat_p99", "lat_std",
+                  "cost_total", "cost_avg", "infer_avg_ms"]
+    for i in range(n_edge):
+        fieldnames += [f"edge_{i+1}_pct", f"edge_{i+1}_count",
+                       f"edge_{i+1}_sla", f"edge_{i+1}_avg_lat"]
+    fieldnames += ["cloud_pct", "cloud_count", "cloud_sla", "cloud_avg_lat",
+                   "rejected_pct", "rejected_count"]
+
+    row = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "policy": args.policy,
+        "n_tasks": args.num_tasks,
+        "concurrency": args.concurrency,
+        "seed": args.seed,
+        "elapsed_sec": round(elapsed, 2),
+        "tasks_per_sec": round(args.num_tasks / max(elapsed, 1e-6), 2),
+    }
+    for k in ["sla_rate", "sla_count", "lat_mean", "lat_median",
+              "lat_p95", "lat_p99", "lat_std",
+              "cost_total", "cost_avg", "infer_avg_ms"]:
+        row[k] = summary.get(k)
+    for i in range(n_edge):
+        pn = summary["per_node"][f"edge_{i+1}"]
+        row[f"edge_{i+1}_pct"]     = pn["pct"]
+        row[f"edge_{i+1}_count"]   = pn["count"]
+        row[f"edge_{i+1}_sla"]     = pn["sla"]
+        row[f"edge_{i+1}_avg_lat"] = pn["avg_latency_ms"]
+    pn = summary["per_node"]["cloud"]
+    row["cloud_pct"]     = pn["pct"]
+    row["cloud_count"]   = pn["count"]
+    row["cloud_sla"]     = pn["sla"]
+    row["cloud_avg_lat"] = pn["avg_latency_ms"]
+    pn = summary["per_node"]["rejected"]
+    row["rejected_pct"]   = pn["pct"]
+    row["rejected_count"] = pn["count"]
+
+    file_exists = os.path.exists(path) and os.path.getsize(path) > 0
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def run_comparison(args):
     """So sánh tất cả policies trên cùng workload."""
-    tasks = generate_tasks(args.num_tasks, seed=args.seed)
+    tasks = generate_tasks(args.num_tasks, seed=args.seed, mix=args.mix)
     policies = sorted(BASELINE_NAMES)
 
     # Map policy_name → model_path cho các RL model
@@ -165,40 +256,86 @@ def run_comparison(args):
         summary = dispatcher.get_summary()
         results[policy_name] = summary
 
+        edges_str = " ".join([
+            f"E{i+1}={summary['per_node'][f'edge_{i+1}']['pct']:.0f}%"
+            for i in range(args.edges)
+        ])
         logger.info(
-            "%-18s | SLA=%5.1f%% | Lat=%6.1fms | Cost=%.4f | "
-            "Edge=%4.1f%% Cloud=%4.1f%% Rej=%4.1f%%",
-            policy_name, summary["sla_rate"], summary["avg_latency_ms"],
-            summary["avg_cost"],
-            summary["edge_usage_pct"], summary["cloud_usage_pct"],
-            summary["reject_usage_pct"],
+            "%-18s | SLA=%5.1f%% | Mean=%6.0fms P95=%6.0fms | "
+            "Cost=%.4f | %s Cloud=%.0f%% Rej=%.0f%%",
+            policy_name, summary["sla_rate"],
+            summary["lat_mean"], summary["lat_p95"],
+            summary["cost_avg"],
+            edges_str,
+            summary["per_node"]["cloud"]["pct"],
+            summary["per_node"]["rejected"]["pct"],
         )
 
-    # Print comparison table
+    # Print comparison table — per-node breakdown
     rl_names = set(rl_models.keys())
-    print(f"\n{'=' * 96}")
-    print(f"{'Policy':<20} {'SLA%':>8} {'Avg Lat(ms)':>12} "
-          f"{'P95 Lat(ms)':>12} {'Avg Cost':>10} {'Edge%':>7} "
-          f"{'Cloud%':>7} {'Rej%':>6}")
-    print(f"{'-' * 96}")
-    for name, s in results.items():
-        marker = " <-- RL" if name in rl_names else ""
-        print(
-            f"{name:<20} {s['sla_rate']:>8.1f} {s['avg_latency_ms']:>12.1f} "
-            f"{s['p95_latency_ms']:>12.1f} {s['avg_cost']:>10.5f} "
-            f"{s['edge_usage_pct']:>7.1f} {s['cloud_usage_pct']:>7.1f} "
-            f"{s['reject_usage_pct']:>6.1f}{marker}"
-        )
-    print(f"{'=' * 96}\n")
+    n_edge = args.edges
+    edge_cols = "".join([f" {'E'+str(i+1)+'%':>6}" for i in range(n_edge)])
+    table_w = 22 + 7 + 11 + 11 + 10 + 6 * n_edge + 7 + 6 + 8
 
-    # Save CSV
+    bar = "═" * table_w
+    print(f"\n{bar}")
+    header = (f"{'Policy':<22}{'SLA%':>7}"
+              f"{'Mean(ms)':>11}{'P95(ms)':>11}{'Cost':>10}"
+              f"{edge_cols}{'Cloud%':>7}{'Rej%':>6}{'Infer(ms)':>10}")
+    print(header)
+    print("─" * table_w)
+
+    for name, s in results.items():
+        marker = " ⭐" if name in rl_names else ""
+        edge_pcts = "".join([
+            f" {s['per_node'][f'edge_{i+1}']['pct']:>6.1f}"
+            for i in range(n_edge)
+        ])
+        print(
+            f"{name:<22}{s['sla_rate']:>7.1f}"
+            f"{s['lat_mean']:>11.1f}{s['lat_p95']:>11.1f}{s['cost_avg']:>10.4f}"
+            f"{edge_pcts}"
+            f"{s['per_node']['cloud']['pct']:>7.1f}"
+            f"{s['per_node']['rejected']['pct']:>6.1f}"
+            f"{s['infer_avg_ms']:>10.3f}{marker}"
+        )
+    print(f"{bar}\n")
+
+    # Save CSV — flatten per_node
     os.makedirs("experiments/logs", exist_ok=True)
     csv_path = "experiments/logs/cli_comparison.csv"
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["policy"] + list(next(iter(results.values())).keys()))
+        # Build flat schema
+        fieldnames = ["policy", "total", "sla_rate", "sla_count",
+                      "lat_mean", "lat_median", "lat_p95", "lat_p99", "lat_std",
+                      "cost_total", "cost_avg", "infer_avg_ms"]
+        for i in range(n_edge):
+            fieldnames += [f"edge_{i+1}_pct", f"edge_{i+1}_count",
+                           f"edge_{i+1}_sla", f"edge_{i+1}_avg_lat"]
+        fieldnames += ["cloud_pct", "cloud_count", "cloud_sla", "cloud_avg_lat",
+                       "rejected_pct", "rejected_count"]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for name, s in results.items():
-            writer.writerow({"policy": name, **s})
+            row = {"policy": name}
+            for k in ["total", "sla_rate", "sla_count",
+                      "lat_mean", "lat_median", "lat_p95", "lat_p99", "lat_std",
+                      "cost_total", "cost_avg", "infer_avg_ms"]:
+                row[k] = s.get(k)
+            for i in range(n_edge):
+                pn = s["per_node"][f"edge_{i+1}"]
+                row[f"edge_{i+1}_pct"]      = pn["pct"]
+                row[f"edge_{i+1}_count"]    = pn["count"]
+                row[f"edge_{i+1}_sla"]      = pn["sla"]
+                row[f"edge_{i+1}_avg_lat"]  = pn["avg_latency_ms"]
+            for role, label in [("cloud", "cloud"), ("rejected", "rejected")]:
+                pn = s["per_node"][role]
+                row[f"{label}_pct"]   = pn["pct"]
+                row[f"{label}_count"] = pn["count"]
+                if role == "cloud":
+                    row["cloud_sla"]      = pn["sla"]
+                    row["cloud_avg_lat"]  = pn["avg_latency_ms"]
+            writer.writerow(row)
     logger.info("Comparison saved: %s", csv_path)
 
 
@@ -235,6 +372,16 @@ def main():
     parser.add_argument(
         "--prometheus", default="http://localhost:9090",
         help="Prometheus URL (default: http://localhost:9090)",
+    )
+    parser.add_argument(
+        "--save-summary", default=None,
+        help="Append run summary to CSV file (gom nhiều policies vào 1 file để vẽ).",
+    )
+    parser.add_argument(
+        "--mix", choices=("default", "tiered"), default="default",
+        help="Workload mix: 'default'=random uniform, "
+             "'tiered'=40%% light + 40%% medium + 20%% heavy "
+             "(để demo task-aware routing).",
     )
     parser.add_argument(
         "--demo", action="store_true",

@@ -181,14 +181,20 @@ class DQNAgent:
         """
         Chọn action theo epsilon-greedy.
         greedy=True → luôn chọn action tốt nhất (dùng lúc evaluate).
+
+        Symmetry-break: khi nhiều action có Q gần bằng nhau (vd edge_1
+        vs edge_2 trong state cân đối), random tiebreak thay vì argmax-bias.
         """
         if not greedy and random.random() < self.epsilon:
             return random.randint(0, self.n_actions - 1)
 
         obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
         with torch.no_grad():
-            q_values = self.q_net(obs_t)
-        return int(q_values.argmax(dim=1).item())
+            q_values = self.q_net(obs_t).squeeze(0).cpu().numpy()
+        # Tiebreak: pick uniformly among actions within ε of max Q
+        max_q = q_values.max()
+        candidates = np.where(q_values >= max_q - 1e-3)[0]
+        return int(np.random.choice(candidates))
 
     # -----------------------------------------------------------------------
     # Learning

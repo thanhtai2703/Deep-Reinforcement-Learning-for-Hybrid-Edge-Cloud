@@ -1,26 +1,50 @@
-EXECUTION_BACKEND=k8s python3 -m dispatcher.dispatcher_cli \
- --policy dqn --model models/checkpoints/dqn_calibrated/dqn_best.pth \
- --num-tasks 50 --concurrency 5 --seed 100 \
- --prometheus http://localhost:9090
-kết quả:
-03:57:28 [INFO] SmartDispatcher: Task task_000049 → cloud | backend=k8s job=task-task-000049-1777694234373 status=succeeded total_ms=14200 submit=0 startup=1000 exec=10000 poll=3139
-CLI: [ 1/50] task_000001 -> rejected | lat= 0.0ms | SLA=MISS
-CLI: [ 2/50] task_000002 -> cloud | lat=29789.0ms | SLA=OK
-CLI: [ 3/50] task_000003 -> cloud | lat=18579.0ms | SLA=OK
-CLI: [ 4/50] task_000004 -> cloud | lat=27648.0ms | SLA=MISS
-CLI: [ 5/50] task_000005 -> cloud | lat=16397.0ms | SLA=OK
-...
-CLI: [ 47/50] task_000047 -> cloud | lat=9448.0ms | SLA=OK
-CLI: [ 48/50] task_000048 -> cloud | lat=5208.0ms | SLA=OK
-CLI: [ 49/50] task_000049 -> cloud | lat=14200.0ms | SLA=OK
-CLI: [ 50/50] task_000050 -> rejected | lat= 0.0ms | SLA=MISS
-=======================================================
-Dispatcher Summary (50 tasks, policy=dqn)
-SLA Rate : 52.0%
-Avg Latency : 7266.9 ms
-P95 Latency : 20267.8 ms
-Avg Cost : 1.85202
-Cloud Usage : 56.0%
-Edge Usage : 44.0%
-=======================================================
-03:57:28 [INFO] CLI: Total time: 79.50s (0.6 tasks/sec)
+[DQNAgent] Model loaded ← models/checkpoints/dqn_calibrated/dqn_best.pth
+
+> > > def make_state(e1_cpu=0.05, e2_cpu=0.05, c_cpu=0.05,  
+> > > ... task_cpu=0.3, task_ram=0.3, task_dl=0.5):  
+> > > ... """Build realistic state vector."""  
+> > > ... return np.array([  
+> > > ... e1_cpu, 0.1, 0.001, 0.0, # edge_1: cpu, ram, lat, queue  
+> > > ... make_state(0.05, 0.05, 0.05, 0.10, 0.10, 0.8))
+
+[1] Cold cluster + light task (cpu=10, ram=10, dl=long)  
+ edge_1 : Q=-25.968  
+ edge_2 : Q=-25.923  
+ cloud : Q=-25.526  
+ reject : Q=-27.188  
+... make_state(0.05, 0.05, 0.05, 0.60, 0.50, 0.3))
+
+[2] Cold cluster + heavy task (cpu=60, ram=50, dl=tight)  
+ edge_1 : Q=-27.365  
+ edge_2 : Q=-26.737  
+ cloud : Q=-26.234  
+ reject : Q=-27.108  
+... make_state(0.95, 0.05, 0.10, 0.20, 0.20, 0.6))
+
+[3] edge_1 saturated, light task  
+ edge_1 : Q=-26.565  
+ edge_2 : Q=-26.465  
+ cloud : Q=-27.244  
+ reject : Q=-27.419  
+... make_state(0.95, 0.95, 0.10, 0.20, 0.20, 0.6))
+
+[4] Both edges saturated, light task  
+ edge_1 : Q=-27.010  
+ edge_2 : Q=-26.952  
+ cloud : Q=-26.504  
+ reject : Q=-27.754  
+... make_state(0.05, 0.05, 0.05, 0.30, 0.25, 0.5))
+
+[5] Real K8s-like (CPU all 5%, queue 0)  
+ edge_1 : Q=-26.174  
+ edge_2 : Q=-26.305  
+ cloud : Q=-24.956  
+ reject : Q=-26.691  
+... make_state(0.05, 0.05, 0.05, 0.20, 0.50, 0.5))
+
+[6] Cold cluster + data-heavy task  
+ edge_1 : Q=-25.145  
+ edge_2 : Q=-25.082  
+ cloud : Q=-25.204  
+ reject : Q=-25.974  
+ → argmax = edge_2, gap = 0.063

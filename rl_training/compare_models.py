@@ -266,16 +266,29 @@ def main():
     parser.add_argument("--dqn",      default="models/checkpoints/dqn_best.pth")
     parser.add_argument("--ppo",      default="models/checkpoints/ppo/ppo_best.zip")
     parser.add_argument("--episodes", type=int, default=COMPARE_CONFIG["n_episodes"])
+    parser.add_argument("--env", choices=("calibrated", "uncalibrated"),
+                        default="calibrated",
+                        help="Environment to evaluate on")
+    parser.add_argument("--tag", default=None,
+                        help="Suffix for output files (vd 'cal_evaluated_on_uncal')")
     args = parser.parse_args()
 
     cfg = COMPARE_CONFIG
     os.makedirs(cfg["log_dir"],  exist_ok=True)
     os.makedirs(cfg["plot_dir"], exist_ok=True)
 
-    env = EdgeCloudEnv(
-        n_edge_nodes = cfg["n_edge_nodes"],
-        max_steps    = cfg["max_steps"],
-    )
+    if args.env == "calibrated":
+        from rl_env.edge_cloud_env_calibrated import EdgeCloudEnvCalibrated
+        env = EdgeCloudEnvCalibrated(
+            n_edge_nodes = cfg["n_edge_nodes"],
+            max_steps    = cfg["max_steps"],
+        )
+    else:
+        env = EdgeCloudEnv(
+            n_edge_nodes = cfg["n_edge_nodes"],
+            max_steps    = cfg["max_steps"],
+        )
+    print(f"[Env] Evaluating on: {args.env}")
     obs_dim   = env.observation_space.shape[0]
     n_actions = env.action_space.n
 
@@ -358,7 +371,8 @@ def main():
                       f"| d={s['effect_size']:.3f} | {sig}")
 
     # ── Save CSV ───────────────────────────────────────────────────────────
-    csv_path = os.path.join(cfg["log_dir"], "model_comparison.csv")
+    suffix = f"_{args.tag}" if args.tag else f"_{args.env}"
+    csv_path = os.path.join(cfg["log_dir"], f"model_comparison{suffix}.csv")
     with open(csv_path, "w", newline="") as f:
         fieldnames = ["policy", "avg_reward", "std_reward", "ci95_reward",
                       "avg_latency", "med_latency", "p95_latency", "p99_latency",
@@ -369,7 +383,7 @@ def main():
             writer.writerow({"policy": name, **{k: round(v, 4) for k, v in m.items()}})
 
     # Stat test CSV
-    stat_path = os.path.join(cfg["log_dir"], "statistical_tests.csv")
+    stat_path = os.path.join(cfg["log_dir"], f"statistical_tests{suffix}.csv")
     with open(stat_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["rl_model", "baseline", "t_stat", "p_value",

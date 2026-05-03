@@ -64,7 +64,7 @@ def load_logs(db_path: Path) -> pd.DataFrame:
             SELECT *
             FROM execution_logs
             WHERE exec_status='succeeded'
-              AND cpu_during_exec IS NOT NULL
+              AND selected_cpu IS NOT NULL
               AND total_ms IS NOT NULL
               AND exec_time_ms IS NOT NULL
               AND target_role IS NOT NULL
@@ -108,22 +108,34 @@ print(f"After cleaning: {len(df)} rows")
 
 
 # %% fit exec_time per role: u = α + (α*β/100)*cpu
+# We fit on selected_cpu (snapshot at dispatch) instead of cpu_during_exec
+# because the env passes the snapshot value to predict_total_ms during
+# training/inference. Fitting on cpu_during_exec would create a train-test
+# mismatch (post-hoc avg vs at-decision snapshot).
 exec_calibration = {}
 for role, sub in df.groupby("target_role"):
     if len(sub) < 5:
         print(f"[skip] {role}: only {len(sub)} samples")
         continue
 
-    cpu = sub["cpu_during_exec"].values
+    cpu = sub["selected_cpu"].values
     u = sub["u"].values
 
     X = np.column_stack([np.ones_like(cpu), cpu])
     coef, *_ = np.linalg.lstsq(X, u, rcond=None)
     a, b = coef
     alpha = float(a)
-    beta = float(100.0 * b / a) if a > 0 else 0.0
+    # Clamp α to be physically meaningful (>= small positive)
+    if alpha < 0.05:
+        # Fallback: use mean(u) as α, β=0 (no contention slope captured)
+        alpha = float(max(np.mean(u), 0.05))
+        beta = 0.0
+        print(f"[warn] {role}: linear fit gave α={float(a):.3f} (≤0); "
+              f"falling back to mean α={alpha:.3f}, β=0")
+    else:
+        beta = float(100.0 * b / a)
 
-    pred_u = X @ coef
+    pred_u = alpha * (1.0 + beta * cpu / 100.0)
     rss = float(np.sum((u - pred_u) ** 2))
     tss = float(np.sum((u - u.mean()) ** 2))
     r2 = 1.0 - rss / tss if tss > 0 else 0.0
@@ -159,7 +171,7 @@ for role, sub in df.groupby("target_role"):
 def predict_uncal(row: pd.Series) -> float:
     base = (UNCAL["cloud_base_latency_ms"] if row["target_role"] == "cloud"
             else UNCAL["edge_base_latency_ms"])
-    return base * (1.0 + row["cpu_during_exec"] / 100.0 * UNCAL["load_coef"])
+    return base * (1.0 + row["selected_cpu"] / 100.0 * UNCAL["load_coef"])
 
 
 def predict_cal(row: pd.Series) -> float:
@@ -169,7 +181,7 @@ def predict_cal(row: pd.Series) -> float:
     ec = exec_calibration[role]
     oh = overhead_calibration[role]
     exec_pred = (ec["alpha"] * row["workload_proxy_ms"]
-                 * (1.0 + ec["beta"] * row["cpu_during_exec"] / 100.0))
+                 * (1.0 + ec["beta"] * row["selected_cpu"] / 100.0))
     return (oh["submit_overhead_ms"] + oh["container_startup_ms"]
             + exec_pred + oh["poll_overhead_ms"])
 
@@ -263,7 +275,7 @@ def plot_exec_fit(df: pd.DataFrame, out: Path):
         axes = [axes]
     for ax, role in zip(axes, roles):
         sub = df[df["target_role"] == role]
-        ax.scatter(sub["cpu_during_exec"], sub["u"], alpha=0.5, s=20)
+        ax.scatter(sub["selected_cpu"], sub["u"], alpha=0.5, s=20)
         if role in exec_calibration:
             ec = exec_calibration[role]
             xx = np.linspace(0, 100, 50)
@@ -272,10 +284,10 @@ def plot_exec_fit(df: pd.DataFrame, out: Path):
                     label=f"α={ec['alpha']:.2f}, β={ec['beta']:.2f}")
             ax.legend()
         ax.set_title(f"{role} (R²={exec_calibration.get(role, {}).get('r2', 0):.3f})")
-        ax.set_xlabel("CPU during exec (%)")
+        ax.set_xlabel("CPU at dispatch / snapshot (%)")
         ax.set_ylabel("u = exec_time / workload_proxy")
         ax.grid(alpha=0.3)
-    fig.suptitle("Per-role contention fit: u = α(1 + β·cpu/100)",
+    fig.suptitle("Per-role contention fit: u = α(1 + β·cpu_snapshot/100)",
                  fontweight="bold")
     fig.tight_layout()
     fig.savefig(out, dpi=140, bbox_inches="tight")
