@@ -118,8 +118,22 @@ class SmartDispatcher:
             use_prometheus=(not demo_mode),
             instance_map=instance_map or {},
         )
+        # Initialize state to in-distribution values BEFORE first dispatch.
+        # Without this, first dispatches see all-zero CPU/RAM which is OOD
+        # vs training distribution (env resets to 5-95% range), causing the
+        # DQN's first decisions to be driven by random NN noise.
+        # In production (Prometheus) mode, prefer real metrics — fetch a
+        # synchronous snapshot now so task #1 sees real cluster state.
         if demo_mode:
             self.state_builder.reset_simulation()
+        else:
+            self.state_builder.reset_simulation()  # seed with reasonable defaults
+            if self.state_builder.use_prometheus and self.state_builder._prom_client is not None:
+                try:
+                    self.state_builder._fetch_prometheus_metrics()
+                    self.state_builder._prom_last_fetch = time.time()
+                except Exception as e:
+                    logger.warning("Initial Prometheus fetch failed: %s — using sim defaults", e)
 
         # Model loader
         obs_dim = n_edge_nodes * 4 + 4 + 3 + 2
@@ -380,8 +394,8 @@ class SmartDispatcher:
         Convert project RAM requirement to Kubernetes memory format.
 
         ram_requirement is a percentage (0-100, matches env state vector).
-        Scale to MB on a 512MB base: 5% → 26MB → clamped to 64Mi floor,
-        50% → 256MB, 100% → 512MB.
+        Scale to MB on a 2048MB base: 5% → 102MB,
+        50% → 1024MB, 100% → 2048MB.
 
         Examples:
         - 5       -> 64Mi   (floor)
@@ -399,9 +413,9 @@ class SmartDispatcher:
         except Exception:
             return "128Mi"
 
-        # Scale percentage to MB (base 512MB)
-        value = int(pct * 5.12)
-        value = max(64, min(value, 1024))
+        # Scale percentage to MB (base 2048MB)
+        value = int(pct * 20.48)
+        value = max(64, min(value, 4096))
         return f"{value}Mi"
 
     def _execute_on_node(self, task: TaskInfo, node_name: str):
@@ -460,7 +474,7 @@ class SmartDispatcher:
                 duration_seconds=duration_seconds,
                 cleanup=False,
                 cpu_intensity=float(task.cpu_requirement),
-                ram_intensity=float(task.ram_requirement),
+                ram_intensity=100.0,  # Ép luôn ăn 80% RAM limit khai báo để tạo áp lực thực sự
             )
 
             total_ms = int((time.perf_counter() - start) * 1000)

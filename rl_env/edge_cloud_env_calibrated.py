@@ -153,11 +153,13 @@ class EdgeCloudEnvCalibrated(EdgeCloudEnv):
         #   so với edge (cost_norm≈0.13). Cloud chỉ thắng khi edge thực sự
         #   saturated (overload_signal cao bù vào).
         # → Overload giảm 2× để agent không quá sợ contention nhẹ trên edge.
+        adaptive_cost_w = 0.40 * (1.5 - 0.5 * overload_signal)  # 0.60 idle → 0.40 saturated
+
         reward = (
             + 0.35 * sla_signal
             - 0.10 * latency_norm
-            - 0.40 * cost_norm        # TĂNG: cloud trở nên đắt rõ rệt
-            - 0.20 * overload_signal  # GIẢM: cho phép dùng edge khi load nhẹ
+            - adaptive_cost_w * cost_norm   # ← thay 0.40 cố định
+            - 0.20 * overload_signal
             - 0.10 * load_std
         )
         if not sla_met:
