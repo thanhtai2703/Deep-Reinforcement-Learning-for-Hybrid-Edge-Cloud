@@ -114,9 +114,17 @@ def generate_tasks(count: int, seed: int = 42, mix: str = "default") -> list:
 
 def run_single_policy(args):
     """Chạy dispatcher với một policy."""
+    # Resolve model path by policy: --dqn-model for DQN, --model for PPO/legacy.
+    if args.policy == "dqn":
+        model_path = args.dqn_model or args.model
+    elif args.policy == "ppo":
+        model_path = args.model or args.dqn_model
+    else:
+        model_path = args.model
+
     dispatcher = SmartDispatcher(
         policy_name=args.policy,
-        model_path=args.model,
+        model_path=model_path,
         n_edge_nodes=args.edges,
         prometheus_url=args.prometheus,
         demo_mode=args.demo,

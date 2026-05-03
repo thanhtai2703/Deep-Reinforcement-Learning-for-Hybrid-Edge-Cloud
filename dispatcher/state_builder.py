@@ -456,6 +456,15 @@ class StateBuilder:
             lat = d.get("network_latency_ms") or 0.0
             if lat == 0.0:
                 lat = self._measure_rtt(role)
+            
+            # Trust Prometheus snapshot for CPU/RAM. The previous "max(old, prom)"
+            # heuristic was meant to preserve pending load but broke dynamics:
+            # CPU could only ever go UP, so once a node accumulated 50% in the
+            # sim cache, even an idle real cluster reading 5% kept it at 50%
+            # → agent saw stale "warm" nodes forever.
+            # Pending load between fetches is already handled by
+            # update_simulation_state() (called per-dispatch); Prometheus
+            # refresh is the source-of-truth checkpoint.
             self._edge_metrics[i] = NodeMetrics(
                 cpu_percent=cpu,
                 ram_percent=d.get("ram_usage_pct") or 0.0,
@@ -480,6 +489,7 @@ class StateBuilder:
             lat = d.get("network_latency_ms") or 0.0
             if lat == 0.0:
                 lat = self._measure_rtt("cloud")
+            
             self._cloud_metrics = NodeMetrics(
                 cpu_percent=cpu,
                 ram_percent=d.get("ram_usage_pct") or 0.0,
