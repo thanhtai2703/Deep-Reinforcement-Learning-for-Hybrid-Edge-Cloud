@@ -40,9 +40,14 @@ logger = logging.getLogger("StateBuilder")
 # Normalization constants (khớp với rl_env/edge_cloud_env.py)
 MAX_CPU = 100.0
 MAX_RAM = 100.0
+MAX_QUEUE = 20.0
+# Default = uncalibrated env (10-200ms scale, 50-500ms deadline).
+# When loading DQN/PPO trained on calibrated env, StateBuilder must use
+# CAL_MAX_LATENCY/CAL_MAX_DEADLINE so observations match training distribution.
 MAX_LATENCY = 200.0
 MAX_DEADLINE = 500.0
-MAX_QUEUE = 20.0
+CAL_MAX_LATENCY = 30000.0   # khớp với edge_cloud_env_calibrated.CAL_MAX_LATENCY_MS
+CAL_MAX_DEADLINE = 30000.0  # khớp với CAL_DEADLINE_MAX_MS
 
 # RTT probe config
 RTT_TIMEOUT_S = 1.0     # Timeout HTTP probe (giây)
@@ -102,9 +107,19 @@ class StateBuilder:
         use_prometheus: bool = False,
         instance_map: Optional[Dict[str, str]] = None,
         worker_urls: Optional[Dict[str, str]] = None,
+        calibrated: bool = True,   # default True vì model production dùng calibrated env
     ):
         self.n_edge_nodes = n_edge_nodes
         self.use_prometheus = use_prometheus
+        # Pick normalization scale matching the env that trained the model.
+        # Calibrated env operates at K8s timescale (5-30s) — uncalibrated
+        # env at sim ms timescale (10-200ms).
+        if calibrated:
+            self.max_latency  = CAL_MAX_LATENCY
+            self.max_deadline = CAL_MAX_DEADLINE
+        else:
+            self.max_latency  = MAX_LATENCY
+            self.max_deadline = MAX_DEADLINE
         # Per-node: cpu, ram, lat, queue → 4 dims
         # Task: cpu_req, ram_req, deadline → 3 dims
         # Temporal: hour_sin, hour_cos → 2 dims
@@ -498,7 +513,7 @@ class StateBuilder:
             obs.extend([
                 m.cpu_percent  / MAX_CPU,
                 m.ram_percent  / MAX_RAM,
-                m.latency_ms   / MAX_LATENCY,
+                m.latency_ms   / self.max_latency,
                 m.queue_length / MAX_QUEUE,
             ])
 
@@ -507,7 +522,7 @@ class StateBuilder:
         obs.extend([
             cm.cpu_percent  / MAX_CPU,
             cm.ram_percent  / MAX_RAM,
-            cm.latency_ms   / MAX_LATENCY,
+            cm.latency_ms   / self.max_latency,
             cm.queue_length / MAX_QUEUE,
         ])
 
@@ -515,7 +530,7 @@ class StateBuilder:
         obs.extend([
             task.cpu_requirement / MAX_CPU,
             task.ram_requirement / MAX_RAM,
-            task.deadline_ms     / MAX_DEADLINE,
+            task.deadline_ms     / self.max_deadline,
         ])
 
         # Temporal: sin/cos giờ trong ngày, map về [0, 1] để khớp obs space

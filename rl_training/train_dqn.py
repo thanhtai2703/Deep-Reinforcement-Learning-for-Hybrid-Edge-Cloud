@@ -98,13 +98,18 @@ def compute_mean_q(agent: DQNAgent, ref_states: np.ndarray) -> float:
 def evaluate_agent(agent: DQNAgent, env: EdgeCloudEnv, n_episodes: int = 20) -> dict:
     """
     Đánh giá agent trong chế độ greedy (không explore).
-    Returns metrics: avg_reward, avg_latency, sla_rate, avg_cost
+    Returns metrics: avg_reward, avg_latency, sla_rate, avg_cost,
+                     edge_pct, cloud_pct, reject_pct.
     """
     total_reward  = 0.0
     total_latency = 0.0
     total_cost    = 0.0
     sla_count     = 0
     total_steps   = 0
+    n_edge_actions = env.n_edge_nodes
+    cloud_action   = n_edge_actions
+    reject_action  = n_edge_actions + 1
+    edge_count = cloud_count = reject_count = 0
 
     for _ in range(n_episodes):
         obs, _ = env.reset()
@@ -120,11 +125,21 @@ def evaluate_agent(agent: DQNAgent, env: EdgeCloudEnv, n_episodes: int = 20) -> 
             sla_count     += int(info["sla_met"])
             total_steps   += 1
 
+            if action < n_edge_actions:
+                edge_count += 1
+            elif action == cloud_action:
+                cloud_count += 1
+            elif action == reject_action:
+                reject_count += 1
+
     return {
         "avg_reward":  total_reward  / n_episodes,
         "avg_latency": total_latency / total_steps,
         "avg_cost":    total_cost    / total_steps,
         "sla_rate":    sla_count     / total_steps * 100,
+        "edge_pct":    edge_count    / total_steps * 100,
+        "cloud_pct":   cloud_count   / total_steps * 100,
+        "reject_pct":  reject_count  / total_steps * 100,
     }
 
 
@@ -232,6 +247,39 @@ def plot_loss_q_curves(log_path: str, plot_dir: str):
     print(f"[Plot] Saved → {path}")
 
 
+def plot_action_distribution(log_path: str, plot_dir: str):
+    """
+    Stacked area chart: % edge / cloud / reject theo episode.
+    Đảm bảo agent không bị collapse (vd 100% reject hoặc 100% cloud).
+    """
+    episodes, edge_pct, cloud_pct, reject_pct = [], [], [], []
+    with open(log_path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            episodes.append(int(row["episode"]))
+            edge_pct.append(float(row.get("edge_pct", 0)))
+            cloud_pct.append(float(row.get("cloud_pct", 0)))
+            reject_pct.append(float(row.get("reject_pct", 0)))
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.stackplot(episodes, edge_pct, cloud_pct, reject_pct,
+                 labels=["Edge", "Cloud", "Reject"],
+                 colors=["#4CAF50", "#2196F3", "#F44336"],
+                 alpha=0.8)
+    ax.set_title("Action Distribution Over Training (eval, greedy)",
+                 fontweight="bold")
+    ax.set_xlabel("Episode"); ax.set_ylabel("% of dispatched actions")
+    ax.set_ylim(0, 100)
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    path = os.path.join(plot_dir, "action_distribution.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[Plot] Saved → {path}")
+
+
 # ---------------------------------------------------------------------------
 # Main Training Loop
 # ---------------------------------------------------------------------------
@@ -280,7 +328,8 @@ def train():
         writer.writerow([
             "episode", "train_reward", "steps", "loss",
             "epsilon", "eval_avg_reward", "eval_avg_latency",
-            "eval_sla_rate", "eval_avg_cost", "mean_q", "elapsed_sec"
+            "eval_sla_rate", "eval_avg_cost", "mean_q",
+            "edge_pct", "cloud_pct", "reject_pct", "elapsed_sec"
         ])
 
     best_reward = -np.inf
@@ -324,6 +373,7 @@ def train():
                 f"eval_r={metrics['avg_reward']:6.2f} | "
                 f"lat={metrics['avg_latency']:6.1f}ms | "
                 f"SLA={metrics['sla_rate']:5.1f}% | "
+                f"E/C/R={metrics['edge_pct']:4.1f}/{metrics['cloud_pct']:4.1f}/{metrics['reject_pct']:4.1f} | "
                 f"meanQ={mean_q:6.3f} | "
                 f"eps={agent.epsilon:.3f} | "
                 f"loss={avg_loss:.4f} | "
@@ -341,6 +391,9 @@ def train():
                     round(metrics["sla_rate"], 2),
                     round(metrics["avg_cost"], 6),
                     round(mean_q, 4),
+                    round(metrics["edge_pct"], 2),
+                    round(metrics["cloud_pct"], 2),
+                    round(metrics["reject_pct"], 2),
                     round(elapsed, 1),
                 ])
 
@@ -364,6 +417,7 @@ def train():
     # Vẽ training curves
     plot_training_curves(log_path, cfg["plot_dir"])
     plot_loss_q_curves(log_path, cfg["plot_dir"])
+    plot_action_distribution(log_path, cfg["plot_dir"])
 
     return agent
 

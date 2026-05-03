@@ -181,6 +181,18 @@ class SmartDispatcher:
             is_cloud = (action == self.n_edge_nodes)
             is_reject = (action == self.reject_action)
 
+            # ── DEBUG: dump first 10 dispatches' state + Q values ──
+            import os as _os
+            if _os.getenv("DQN_DEBUG", "0") in ("1", "true") and self._dispatch_count < 10:
+                logger.info(
+                    "[DEBUG #%d] state=%s | metrics=%s | Q=%s | action=%d -> %s",
+                    self._dispatch_count,
+                    [round(float(x), 3) for x in state.tolist()],
+                    metrics_summary,
+                    [round(q, 3) for q in (q_values or [])],
+                    action, node_name,
+                )
+
             # 4. Update internal state IMMEDIATELY so next thread
             #    sees the load impact of this dispatch.
             self.state_builder.update_simulation_state(action, task)
@@ -367,10 +379,15 @@ class SmartDispatcher:
         """
         Convert project RAM requirement to Kubernetes memory format.
 
+        ram_requirement is a percentage (0-100, matches env state vector).
+        Scale to MB on a 512MB base: 5% → 26MB → clamped to 64Mi floor,
+        50% → 256MB, 100% → 512MB.
+
         Examples:
-        - 128      -> 128Mi
-        - 256      -> 256Mi
-        - "512Mi"  -> "512Mi"
+        - 5       -> 64Mi   (floor)
+        - 30      -> 154Mi
+        - 50      -> 256Mi
+        - "512Mi" -> "512Mi" (passthrough)
         """
         value_str = str(ram_requirement).strip()
 
@@ -378,10 +395,12 @@ class SmartDispatcher:
             return value_str
 
         try:
-            value = int(float(value_str))
+            pct = float(value_str)
         except Exception:
             return "128Mi"
 
+        # Scale percentage to MB (base 512MB)
+        value = int(pct * 5.12)
         value = max(64, min(value, 1024))
         return f"{value}Mi"
 
@@ -691,48 +710,121 @@ class SmartDispatcher:
     # ------------------------------------------------------------------
 
     def get_summary(self) -> dict:
-        """Thống kê tổng hợp từ kết quả dispatch trong memory."""
+        """
+        Per-node summary cho phân tích khoa học.
+
+        Trả về dict gồm:
+          - Overall: total, sla_rate, latency stats (mean/median/p95/p99/std), cost
+          - Per-node: edge_i_pct/count, cloud_pct/count, reject_pct/count
+          - SLA broken-down theo node (giúp debug node nào miss SLA nhiều)
+        """
         if not self._results:
             return {"total": 0}
 
-        sla_flags = [r.sla_met for r in self._results]
-        latencies = [r.latency_est_ms for r in self._results]
-        costs = [r.cost_est for r in self._results]
-        nodes = [r.selected_node for r in self._results]
+        latencies = np.array([r.latency_est_ms for r in self._results])
+        costs     = np.array([r.cost_est for r in self._results])
+        nodes     = [r.selected_node for r in self._results]
+        sla_flags = np.array([r.sla_met for r in self._results])
+        infer_ms  = np.array([r.inference_ms for r in self._results])
+        n         = len(self._results)
 
-        cloud_count  = sum(1 for n in nodes if n == "cloud")
-        reject_count = sum(1 for n in nodes if n == "rejected")
-        edge_count   = len(nodes) - cloud_count - reject_count
+        # Per-node breakdown
+        per_node = {}
+        for role in [f"edge_{i + 1}" for i in range(self.n_edge_nodes)] \
+                    + ["cloud", "rejected"]:
+            mask = np.array([x == role for x in nodes])
+            count = int(mask.sum())
+            per_node[role] = {
+                "count": count,
+                "pct":   round(count / n * 100, 1),
+                "sla":   (round(float(sla_flags[mask].mean()) * 100, 1)
+                          if count > 0 else None),
+                "avg_latency_ms": (round(float(latencies[mask].mean()), 1)
+                                   if count > 0 else None),
+            }
 
+        # Overall stats
         return {
-            "total": self._dispatch_count,
-            "sla_rate": round(sum(sla_flags) / len(sla_flags) * 100, 1),
-            "avg_latency_ms": round(float(np.mean(latencies)), 1),
-            "p95_latency_ms": round(float(np.percentile(latencies, 95)), 1),
-            "avg_cost": round(float(np.mean(costs)), 5),
-            "edge_usage_pct":   round(edge_count   / len(nodes) * 100, 1),
-            "cloud_usage_pct":  round(cloud_count  / len(nodes) * 100, 1),
-            "reject_usage_pct": round(reject_count / len(nodes) * 100, 1),
+            "total": n,
             "policy": self.policy_name,
+            # SLA
+            "sla_rate":   round(float(sla_flags.mean()) * 100, 1),
+            "sla_count":  int(sla_flags.sum()),
+            # Latency
+            "lat_mean":   round(float(np.mean(latencies)), 1),
+            "lat_median": round(float(np.median(latencies)), 1),
+            "lat_p95":    round(float(np.percentile(latencies, 95)), 1),
+            "lat_p99":    round(float(np.percentile(latencies, 99)), 1),
+            "lat_std":    round(float(np.std(latencies)), 1),
+            # Cost
+            "cost_total": round(float(np.sum(costs)), 4),
+            "cost_avg":   round(float(np.mean(costs)), 5),
+            # Inference
+            "infer_avg_ms": round(float(np.mean(infer_ms)), 3),
+            # Per-node
+            "per_node": per_node,
+            # Backward-compat aliases
+            "avg_latency_ms":   round(float(np.mean(latencies)), 1),
+            "p95_latency_ms":   round(float(np.percentile(latencies, 95)), 1),
+            "avg_cost":         round(float(np.mean(costs)), 5),
+            "edge_usage_pct":   round(sum(per_node[f"edge_{i+1}"]["count"]
+                                           for i in range(self.n_edge_nodes))
+                                       / n * 100, 1),
+            "cloud_usage_pct":  per_node["cloud"]["pct"],
+            "reject_usage_pct": per_node["rejected"]["pct"],
         }
 
     def print_summary(self):
-        """In thống kê ra terminal."""
+        """In thống kê khoa học ra terminal."""
         s = self.get_summary()
         if s["total"] == 0:
             print("No tasks dispatched yet.")
             return
 
-        print(f"\n{'=' * 55}")
-        print(f"  Dispatcher Summary ({s['total']} tasks, policy={s['policy']})")
-        print(f"  SLA Rate      : {s['sla_rate']:.1f}%")
-        print(f"  Avg Latency   : {s['avg_latency_ms']:.1f} ms")
-        print(f"  P95 Latency   : {s['p95_latency_ms']:.1f} ms")
-        print(f"  Avg Cost      : {s['avg_cost']:.5f}")
-        print(f"  Edge Usage    : {s['edge_usage_pct']:.1f}%")
-        print(f"  Cloud Usage   : {s['cloud_usage_pct']:.1f}%")
-        print(f"  Reject Usage  : {s['reject_usage_pct']:.1f}%")
-        print(f"{'=' * 55}\n")
+        WIDTH = 64
+        bar = "═" * WIDTH
+
+        print()
+        print(bar)
+        print(f"  Smart Dispatcher Report — policy={s['policy']:<20s}")
+        print(bar)
+        print(f"  Tasks dispatched      : {s['total']}")
+        print(f"  Avg inference latency : {s['infer_avg_ms']:.3f} ms / task")
+
+        print(f"\n  ── SLA Compliance ──")
+        sla_miss = s['total'] - s['sla_count'] - s['per_node']['rejected']['count']
+        print(f"  SLA met               : {s['sla_rate']:>5.1f}%  "
+              f"({s['sla_count']:>3d}/{s['total']})")
+        print(f"  Deadline missed       : "
+              f"{sla_miss/s['total']*100:>5.1f}%  ({sla_miss:>3d}/{s['total']})")
+        print(f"  Rejected              : "
+              f"{s['per_node']['rejected']['pct']:>5.1f}%  "
+              f"({s['per_node']['rejected']['count']:>3d}/{s['total']})")
+
+        print(f"\n  ── Latency (ms) ──")
+        print(f"  Mean                  : {s['lat_mean']:>9.1f}")
+        print(f"  Median                : {s['lat_median']:>9.1f}")
+        print(f"  P95                   : {s['lat_p95']:>9.1f}")
+        print(f"  P99                   : {s['lat_p99']:>9.1f}")
+        print(f"  Std                   : {s['lat_std']:>9.1f}")
+
+        print(f"\n  ── Cost ──")
+        print(f"  Total                 : {s['cost_total']:>9.4f}")
+        print(f"  Avg / task            : {s['cost_avg']:>9.5f}")
+
+        print(f"\n  ── Action Distribution ──")
+        for role in [f"edge_{i + 1}" for i in range(self.n_edge_nodes)] \
+                    + ["cloud", "rejected"]:
+            pn = s["per_node"][role]
+            sla_str = (f"SLA={pn['sla']:>5.1f}%"
+                       if pn["sla"] is not None else "SLA=  -  ")
+            lat_str = (f"avg_lat={pn['avg_latency_ms']:>7.1f}ms"
+                       if pn["avg_latency_ms"] is not None else "avg_lat=  -    ")
+            print(f"  {role:<13s} : {pn['pct']:>5.1f}%  "
+                  f"({pn['count']:>3d}/{s['total']})  | {sla_str}  {lat_str}")
+
+        print(bar)
+        print()
 
     def switch_policy(self, policy_name: str, model_path: Optional[str] = None):
         """Hot-switch sang policy khác mà không restart."""

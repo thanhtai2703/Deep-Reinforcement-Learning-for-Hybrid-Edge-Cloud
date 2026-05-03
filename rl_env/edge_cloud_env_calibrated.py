@@ -144,12 +144,21 @@ class EdgeCloudEnvCalibrated(EdgeCloudEnv):
         all_cpus = np.append(self._edge_cpu, self._cloud_cpu)
         load_std = float(np.std(all_cpus) / 100.0)
 
+        # ── Reward weights — REBALANCED for cost-aware edge utilization ──
+        # Trước (over-conservative, agent collapse về 100% cloud):
+        #   sla=0.35  lat=0.15  cost=0.20  overload=0.40  load_std=0.15
+        # Sau (cost-aware, force edge usage when cluster idle):
+        #   sla=0.35  lat=0.10  cost=0.40  overload=0.20  load_std=0.10
+        # → Cost penalty tăng 2× làm cloud (cost_norm≈0.64) đắt hơn nhiều
+        #   so với edge (cost_norm≈0.13). Cloud chỉ thắng khi edge thực sự
+        #   saturated (overload_signal cao bù vào).
+        # → Overload giảm 2× để agent không quá sợ contention nhẹ trên edge.
         reward = (
             + 0.35 * sla_signal
-            - 0.15 * latency_norm
-            - 0.20 * cost_norm
-            - 0.40 * overload_signal  # TĂNG MẠNH: Tránh xa các node đang full CPU!
-            - 0.15 * load_std         # TĂNG MẠNH: Ép buộc phải chia đều task ra các node
+            - 0.10 * latency_norm
+            - 0.40 * cost_norm        # TĂNG: cloud trở nên đắt rõ rệt
+            - 0.20 * overload_signal  # GIẢM: cho phép dùng edge khi load nhẹ
+            - 0.10 * load_std
         )
         if not sla_met:
             reward -= 0.25
@@ -213,27 +222,39 @@ class EdgeCloudEnvCalibrated(EdgeCloudEnv):
 
         if is_cloud:
             node_cpu = self._cloud_cpu
+            node_queue = self._cloud_queue
             cost_rate = CLOUD_COST_PER_UNIT
             # WAN network latency (from _simulate_node_metrics: 30-80ms + cpu*0.2)
             network_latency = self._cloud_latency
         else:
             node_cpu = self._edge_cpu[action]
+            node_queue = self._edge_queue[action]
             cost_rate = EDGE_COST_PER_UNIT
             # LAN network latency (from _simulate_node_metrics: 5-30ms + cpu*0.3)
             network_latency = self._edge_latency[action]
 
-        # Calibrated K8s execution latency (overhead + CPU burn)
+        # Calibrated K8s execution latency (overhead + CPU burn + queue bottleneck)
+        # Truyền queue_length để mô phỏng K8s scheduler bottleneck:
+        # khi node có nhiều task xếp hàng, latency tăng phi tuyến.
         k8s_latency = predict_total_ms(
             role=role,
             cpu_requirement=task_cpu_req,
             deadline_ms=deadline,
             cpu_during_exec=float(node_cpu),
+            queue_length=float(node_queue),
         )
 
         # Total = K8s execution + network round-trip
         latency = k8s_latency + network_latency
 
+        # Cost: base CPU+RAM cost + cloud-only data egress fee
+        # Cloud transfer cost mô phỏng "chi phí truyền tải data lên cloud"
+        # — task ram-heavy lên cloud bị phạt thêm để khuyến khích edge khi có thể
         cost = (task_cpu_req + task_ram_req) * cost_rate
+        if is_cloud:
+            transfer_cost = task_ram_req * 0.03  # data egress fee (proxy by ram size)
+            cost += transfer_cost
+
         sla_met = latency <= deadline
 
         return float(latency), float(cost), bool(sla_met)

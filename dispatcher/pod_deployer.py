@@ -56,12 +56,28 @@ def _safe_name(value: str) -> str:
 def load_k8s_config() -> None:
     """
     Load Kubernetes config.
-    On cloud-1, K3s kubeconfig is usually at /etc/rancher/k3s/k3s.yaml.
+
+    Resolution order:
+      1. $KUBECONFIG env var (if set)
+      2. ~/.kube/config (default)
+      3. KUBECONFIG_PATH constant (legacy fallback)
+      4. In-cluster config (when running inside a pod)
     """
-    try:
-        config.load_kube_config(config_file=KUBECONFIG_PATH)
-    except Exception:
-        config.load_incluster_config()
+    import os
+    candidates = []
+    if os.getenv("KUBECONFIG"):
+        candidates.append(os.environ["KUBECONFIG"])
+    candidates.append(os.path.expanduser("~/.kube/config"))
+    candidates.append(KUBECONFIG_PATH)
+
+    for path in candidates:
+        if path and os.path.exists(path):
+            try:
+                config.load_kube_config(config_file=path)
+                return
+            except Exception:
+                continue
+    config.load_incluster_config()
 
 
 def deploy_task_pod(

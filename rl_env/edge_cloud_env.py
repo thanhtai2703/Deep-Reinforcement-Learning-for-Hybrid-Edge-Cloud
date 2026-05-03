@@ -14,7 +14,9 @@ MAX_DEADLINE        = 500.0  # ms
 MAX_QUEUE           = 20.0   # Số task tối đa mỗi node có thể queue
 QUEUE_DECAY         = 0.85   # Hệ số decay queue mỗi step (mô phỏng task complete)
 NODE_FAILURE_PROB   = 0.005  # Xác suất 1 edge node fail mỗi step (training robustness)
-REJECT_PENALTY      = -0.8   # Phạt nặng reject để agent ưu tiên dispatch
+REJECT_PENALTY      = -1.5   # Phạt nặng reject để agent ưu tiên dispatch
+                              # (-1.5 > tổng penalty tệ nhất khi dispatch saturated
+                              #  → reject chỉ là last-resort khi mọi node thật sự kẹt)
 
 
 class EdgeCloudEnv(gym.Env):
@@ -169,11 +171,32 @@ class EdgeCloudEnv(gym.Env):
     def _simulate_node_metrics(self, add_noise: bool = False):
         """Sinh metrics giả lập cho Edge nodes và Cloud."""
         if not add_noise:
-            # Init lần đầu (reset): set giá trị ban đầu
-            self._edge_cpu  = self.np_random.uniform(20, 70, self.n_edge_nodes)
-            self._edge_ram  = self.np_random.uniform(30, 80, self.n_edge_nodes)
-            self._cloud_cpu = float(self.np_random.uniform(10, 50))
-            self._cloud_ram = float(self.np_random.uniform(10, 50))
+            # Domain randomization (anti-lock-in + match real-K8s distribution):
+            #   30%: cluster idle (giống trạng thái real K8s vừa khởi động)
+            #   30%: asymmetric — 1 edge saturated trước, các node khác fresh
+            #   40%: generic uniform
+            scenario = self.np_random.random()
+            if scenario < 0.30:
+                # Cold cluster — match idle real K8s state
+                self._edge_cpu  = self.np_random.uniform(5, 20, self.n_edge_nodes)
+                self._edge_ram  = self.np_random.uniform(5, 25, self.n_edge_nodes)
+                self._cloud_cpu = float(self.np_random.uniform(5, 20))
+                self._cloud_ram = float(self.np_random.uniform(5, 25))
+            elif scenario < 0.60:
+                # Asymmetric: 1 edge saturated, others fresh — chống edge_1 lock-in
+                heavy = int(self.np_random.integers(self.n_edge_nodes))
+                self._edge_cpu = self.np_random.uniform(5, 30, self.n_edge_nodes)
+                self._edge_cpu[heavy] = float(self.np_random.uniform(75, 95))
+                self._edge_ram = self.np_random.uniform(10, 50, self.n_edge_nodes)
+                self._edge_ram[heavy] = float(self.np_random.uniform(70, 90))
+                self._cloud_cpu = float(self.np_random.uniform(5, 40))
+                self._cloud_ram = float(self.np_random.uniform(5, 40))
+            else:
+                # Generic uniform — phổ chung
+                self._edge_cpu  = self.np_random.uniform(10, 80, self.n_edge_nodes)
+                self._edge_ram  = self.np_random.uniform(10, 80, self.n_edge_nodes)
+                self._cloud_cpu = float(self.np_random.uniform(5, 60))
+                self._cloud_ram = float(self.np_random.uniform(5, 60))
         else:
             # Step update: thêm noise vào giá trị hiện tại
             for i in range(self.n_edge_nodes):
